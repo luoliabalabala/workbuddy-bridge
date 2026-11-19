@@ -88,24 +88,69 @@ export async function readState(connection) {
     const homeComposer = anyComposer && !conversation
     const composerModel = textOf(pick('.cr-model-selector__trigger .cr-model-selector__trigger-label') || pick('.cr-model-selector__trigger'))
     const chips = pickAll('.cr-status-chips .cr-chip-base').map(textOf)
-    const title = textOf(pick('.conversation-title, .cb-conversation-header__title, .conversation-header__title'))
+    const title = textOf(pick('.workbuddy-topbar-title, .conversation-title, .cb-conversation-header__title, .conversation-header__title'))
+    const identity = pick('[data-conversation-input-id]')?.getAttribute('data-conversation-input-id')
     const ctx = textOf(pick('.cr-context-usage'))
     const expertTab = pickAll('button.conversation-list-tab-button').find((el) => textOf(el).startsWith('专家'))
     const banner = textOf(pick('.cr-agent__completion-status'))
     return {
       settings: isSettings,
-      view: isSettings ? 'settings' : (conversation ? 'conversation' : (homeComposer ? 'home' : 'other')),
+      view: isSettings ? 'settings' : identity ? (identity.startsWith('__home__:') ? 'home' : 'conversation') : (conversation ? 'conversation' : (homeComposer ? 'home' : 'other')),
       quickActions,
       expertPage: expertTab ? expertTab.getAttribute('aria-selected') === 'true' : false,
       model: composerModel || undefined,
       chips,
       title: title || undefined,
+      sessionId: identity && !identity.startsWith('__home__:') ? identity : undefined,
       contextLabel: ctx || undefined,
       completionStatus: banner || undefined,
       sendDisabled: (() => { const btn = pick('.cr-send-button'); return btn ? (btn.hasAttribute('disabled') || btn.className.includes('disabled')) : true })(),
-      composerText: (() => { const editor = pick('.conversation-input__box [contenteditable="true"], ._editable_1cxd2_1, [role="textbox"][contenteditable="true"]'); return textOf(editor) })(),
+      composerHasText: !!textOf(pick('.conversation-input__box [contenteditable="true"], ._editable_1cxd2_1, [role="textbox"][contenteditable="true"]')),
     }
   `)
+}
+
+/** Stable identity belongs to the visible composer, not a sidebar title. */
+export async function readIdentity(connection) {
+  return pageEval(connection, `
+    const ids = [...new Set(pickAll('[data-conversation-input-id]').map(e=>e.getAttribute('data-conversation-input-id')))]
+    return { sessionId: ids.length === 1 && !ids[0].startsWith('__home__:') ? ids[0] : null, home: ids.length === 1 && ids[0].startsWith('__home__:'), source: 'data-conversation-input-id', ambiguous: ids.length > 1 }
+  `)
+}
+export async function openSessionById(connection, id, { timeoutMs = 20000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const identity = await readIdentity(connection)
+    if (identity.sessionId === id) return identity
+    const point = await pageEval(connection, `
+      const target = document.querySelector(${JSON.stringify('.cb-agent-card[data-conversation-id=')} + JSON.stringify(${JSON.stringify(id)}) + ']')
+      if (!target) return null
+      target.scrollIntoView({block:'center'})
+      return visible(target) ? center(target) : null
+    `)
+    if (point) {
+      await connection.click(point.x, point.y)
+      return waitForPage(connection, `pickAll('[data-conversation-input-id]').some(e=>e.getAttribute('data-conversation-input-id') === ${JSON.stringify(id)})`, { timeoutMs: 8000, label: `session ${id}` })
+    }
+    const more = await pageEval(connection, `const button=pick('button.conversation-show-more-button');return button?center(button):null`)
+    if (!more) throw new Error(`Session id ${id} not found in the visible sidebar; expand its group in WorkBuddy.`)
+    await connection.click(more.x, more.y)
+    await settle(400)
+  }
+  throw new Error(`Timed out opening session ${id}`)
+}
+export async function stopTurn(connection, id) {
+  const identity = await readIdentity(connection)
+  if (identity.sessionId !== id) throw new Error(`Cancel target mismatch: expected ${id}, observed ${identity.sessionId ?? 'unknown'}`)
+  const point = await pageEval(connection, `
+    const icon=pick('.cr-send-button [class*="stop"], .cr-send-button [class*="Stop"]')
+    const explicit=pickAll('button,[role="button"]').find(e=>/^(停止|停止生成|停止任务|Stop|Stop generating)$/i.test(e.getAttribute('aria-label')||e.textContent?.trim()||''))
+    const button=icon?.closest('button,.cr-send-button') || explicit
+    return button && visible(button) ? center(button) : null
+  `)
+  if (!point) throw new Error('A verified stop control is not visible; no interrupt was sent.')
+  await connection.click(point.x, point.y)
+  return { requested: true, sessionId: id }
 }
 
 /** Click a left-rail tab by its visible label prefix (新建任务, 专家·技能·连接器, ...). */
@@ -722,6 +767,8 @@ export async function typeTask(connection, text) {
   const normalized = (value) => String(value).replace(/\s+/g, ' ').trim()
   if (normalized(state.text) !== normalized(text)) {
     // One retry: the editor sometimes needs a real keypress before insertText lands.
+    await connection.selectAll()
+    await connection.key(['Backspace'])
     await connection.insertText(text)
     await settle(250)
     const again = await pageEval(connection, `

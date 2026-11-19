@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "workbuddy-bridge",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "在 Windows 桌面上为 Codex 和 ChatGPT Work 提供共用的 WorkBuddy 工具。",
   "extensions": {
     "com.openai": {

@@ -114,7 +114,7 @@ export async function query(request, { dbPath = DB_PATH, helperPath } = {}) {
           return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and coalesce(nullif(custom_title, ''), title) = ?`).all(request.title) }
         }
         if (request.op === 'active') {
-          return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and status in ('active', 'running', 'pending')`).all() }
+          return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and lower(status) in ('active', 'working', 'running', 'pending', 'queued')`).all() }
         }
         if (request.op === 'latest') {
           return {
@@ -164,7 +164,16 @@ export async function activeSessions(options = {}) {
   return query({ op: 'active' }, options)
 }
 
-const SKIP_USER_PREFIXES = ['<system-reminder', '<user_info', '<cwd>', '<context>']
+export function stripContextPreamble(value) {
+  let text = String(value).trimStart()
+  for (let i = 0; i < 10; i++) {
+    const next = text.replace(/^<(system-reminder|user_info|cwd|context)\b[^>]*>[\s\S]*?<\/\1>\s*/i, '')
+    if (next === text) break
+    text = next
+  }
+  const query = text.match(/^<user_query>([\s\S]*)<\/user_query>\s*$/i)
+  return query ? query[1] : text
+}
 
 function textOfContent(content) {
   if (typeof content === 'string') return content
@@ -256,16 +265,16 @@ export function readTranscript(sessionId, cwd, options = {}) {
     }
     if (entry.type === 'ai-title' && typeof entry.aiTitle === 'string') title = entry.aiTitle
     else if (entry.type === 'message' && entry.role === 'user') {
-      const text = textOfContent(entry.content)
-      if (text.length > 0 && !SKIP_USER_PREFIXES.some((prefix) => text.trimStart().startsWith(prefix))) {
+      const text = stripContextPreamble(textOfContent(entry.content))
+      if (text.length > 0 && !text.startsWith('<conversation_history_summary>')) {
         userTexts.push(text)
-        userEvents.push({ text, offset: lineOffset })
+        userEvents.push({ text, offset: lineOffset, id: entry.id, timestamp: entry.timestamp })
       }
     } else if (entry.type === 'message' && entry.role === 'assistant') {
       const text = textOfContent(entry.content)
       if (text.length > 0) {
         assistantTexts.push(text)
-        assistantEvents.push({ text, offset: lineOffset })
+        assistantEvents.push({ text, offset: lineOffset, id: entry.id, timestamp: entry.timestamp, status: entry.status })
       }
     } else if (entry.type === 'function_call') {
       const name = String(entry.name ?? entry.toolName ?? entry.tool ?? 'unknown')

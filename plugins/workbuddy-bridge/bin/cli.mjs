@@ -8,7 +8,7 @@ try {
   const [command, name, raw = '{}', ...extra] = process.argv.slice(2)
   if (!command || command === '--help' || command === 'help') { console.log(help) }
   else if (command === 'doctor') {
-    console.log(JSON.stringify({ ok: true, node: process.version, platform: process.platform, executable: findExecutable(config.appPath) ?? null, databaseExists: fs.existsSync(config.dbPath ?? DB_PATH), port: config.port ?? 9222, autoRestart: config.autoRestart === true, action: 'observation only; app not launched or restarted' }, null, 2))
+    console.log(JSON.stringify({ ok: true, node: process.version, platform: process.platform, executable: findExecutable(config.appPath) ?? null, databaseExists: fs.existsSync(config.dbPath ?? DB_PATH), port: config.port ?? 9222, autoRestart: config.autoRestart !== false, action: 'observation only; app not launched or restarted' }, null, 2))
   } else if (command === 'tools') { console.log(JSON.stringify(createBridge(config).listTools(), null, 2)) }
   else if (command === 'call' && name && !extra.length) {
     const result = await createBridge(config).callTool(name, JSON.parse(raw))

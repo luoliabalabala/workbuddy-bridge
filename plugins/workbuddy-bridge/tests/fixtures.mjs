@@ -4,7 +4,9 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { projectSlug } from '../lib/paths.js'
 export function fixture(t) {
-  const prefix = path.join(os.tmpdir(), 'wb-bridge-test-')
+  const testTmp = process.env.WORKBUDDY_TEST_TMP ?? os.tmpdir()
+  fs.mkdirSync(testTmp, {recursive:true})
+  const prefix = path.join(testTmp, 'wb-bridge-test-')
   const root = fs.mkdtempSync(prefix)
   let db
   t.after(() => {

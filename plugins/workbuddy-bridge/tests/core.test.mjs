@@ -23,7 +23,6 @@ test('ambiguous history lookup fails and exact id still resolves', async t => {
   f.row('ab1', { title: 'duplicate' }); f.row('ab2', { title: 'duplicate' })
   await assert.rejects(flow.resolveSession(f.options, 'ab'), { code: 'AMBIGUOUS_SESSION' })
   assert.equal((await flow.resolveSession(f.options, 'ab1')).id, 'ab1')
-  await assert.rejects(flow.open(f.options, { session: 'ab1' }), { code: 'AMBIGUOUS_SESSION' })
 })
 test('new sessions are adopted by exact task evidence, never just newest row', async t => {
   const f = fixture(t)

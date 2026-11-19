@@ -6,8 +6,9 @@ import { ensureRunning } from './app.js'
 import { debuggerVersion, waitForWindows, withWindow, sleep } from './cdp.js'
 import * as dom from './dom.js'
 import * as store from './store.js'
-import { DB_PATH } from './paths.js'
+import { DB_PATH, transcriptPath } from './paths.js'
 import helperPath from './helper-path.js'
+import { isBusy, taskHash, createTicket, saveTicket, loadTicket, existingRequest, evidenceOf, observe } from './dispatch.js'
 
 const fail = (code, text) => Object.assign(new Error(text), { code })
 const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim()
@@ -15,7 +16,7 @@ const dbOptions = options => ({ dbPath: options.dbPath, helperPath: options.help
 const transcript = (options, row) => store.readTranscript(row.id, row.cwd, dbOptions(options))
 
 export function resolveOptions(config = {}) {
-  return { ...config, port: Number(config.port) || 9222, launchTimeoutMs: Number(config.launchTimeoutMs) || 30000, waitTimeoutSec: Number(config.waitTimeoutSec) || 900, autoRestart: config.autoRestart === true, dbPath: config.dbPath ?? DB_PATH, helperPath }
+  return { ...config, port: Number(config.port) || 9222, launchTimeoutMs: Number(config.launchTimeoutMs) || 30000, waitTimeoutSec: Number(config.waitTimeoutSec) || 30, autoRestart: config.autoRestart !== false, dbPath: config.dbPath ?? DB_PATH, helperPath }
 }
 async function ready(options, extra = {}) { return ensureRunning({ ...options, ...extra }) }
 export function describeSession(row) {
@@ -63,26 +64,20 @@ export async function resolveSession(options, value) {
   return matches[0]
 }
 async function verifyVisible(options, row) {
-  const title = row.custom_title || row.title
+  const identity = await withWindow(options.port, 'main', dom.readIdentity)
+  if (identity.sessionId !== row.id) throw Object.assign(fail('SESSION_NOT_VERIFIED', `Expected session ${row.id}; observed ${identity.sessionId ?? (identity.home ? 'home' : 'unknown')}. No message was sent.`), { details: { expected: row.id, observed: identity } })
   const state = await withWindow(options.port, 'main', dom.readState)
-  if (state.view !== 'conversation' || normalize(state.title) !== normalize(title)) throw fail('SESSION_NOT_VERIFIED', 'Visible conversation does not match the selected title; no task was sent.')
   return state
 }
 export async function open(options, { session = 'new' } = {}) {
   // Resolve and reject ambiguous history before changing the UI.
   const row = session === 'new' ? undefined : await resolveSession(options, session)
-  if (row) {
-    const title = row.custom_title || row.title
-    if (!title) throw fail('SESSION_NOT_VERIFIED', 'Session has no visible title.')
-    const duplicates = await store.query({ op: 'title', title }, dbOptions(options))
-    if (!duplicates.ok || duplicates.rows?.length !== 1) throw fail('AMBIGUOUS_SESSION', 'History is opened by title; its title must be unique in the database. Rename duplicates in WorkBuddy first.')
-  }
   await ready(options)
   if (!row) {
     await withWindow(options.port, 'main', dom.openNewTask)
     return { ok: true, text: 'Opened new task.', state: await withWindow(options.port, 'main', dom.readState) }
   }
-  await withWindow(options.port, 'main', connection => dom.openSessionByTitle(connection, row.custom_title || row.title))
+  await withWindow(options.port, 'main', connection => dom.openSessionById(connection, row.id))
   const state = await verifyVisible(options, row)
   return { ok: true, text: `Opened ${describeSession(row)}`, row, sessionId: row.id, state }
 }
@@ -112,29 +107,40 @@ export async function configure(options, { model, effort, contextK, expert } = {
 }
 
 /** Bind a new send to an appended user event and subsequent assistant events. */
-export function turnEvidence(log, evidence) {
+export function turnEvidence(log, evidence, { allowSuperseded = false } = {}) {
   const users = (log.userEvents ?? []).filter(event => event.offset >= evidence.baselineBytes)
-  const matching = users.filter(event => normalize(event.text) === normalize(evidence.task))
+  const matching = users.filter(event => evidence.taskHash ? taskHash(event.text) === evidence.taskHash : normalize(event.text) === normalize(evidence.task))
   if (matching.length > 1) throw fail('AMBIGUOUS_TURN', 'The task text appears multiple times after the baseline; cannot select a turn.')
   const user = matching[0]
   if (!user) return { userObserved: false, answer: undefined }
   const following = users.find(event => event.offset > user.offset)
-  if (following) throw fail('TURN_SUPERSEDED', 'Another user turn appeared after the submitted task. Inspect the session before continuing.')
-  const answer = (log.assistantEvents ?? []).filter(event => event.offset > user.offset).at(-1)?.text
-  return { userObserved: true, answer, userOffset: user.offset }
+  if (following && !allowSuperseded) throw fail('TURN_SUPERSEDED', 'Another user turn appeared after the submitted task. Inspect the session before continuing.')
+  const answer = (log.assistantEvents ?? []).filter(event => event.offset > user.offset && (!following || event.offset < following.offset)).at(-1)?.text
+  return { userObserved: true, answer, userOffset: user.offset, userId: user.id, userTimestamp: user.timestamp, superseded: !!following }
 }
 export async function adoptNewSession(options, evidence) {
-  const response = await store.sessionsSince(evidence.since, dbOptions(options))
+  const response = evidence.beforeSessions ? await store.listSessions({ ...dbOptions(options), limit: 200 }) : await store.sessionsSince(evidence.since, dbOptions(options))
   if (!response.ok) throw fail('DB_UNAVAILABLE', response.error)
-  const matches = response.rows.filter(row => turnEvidence(transcript(options, row), { ...evidence, baselineBytes: 0 }).userObserved)
+  const matches = response.rows.filter(row => {
+    const before = evidence.beforeSessions?.[row.id]
+    if (evidence.sessionId && row.id !== evidence.sessionId) return false
+    if (!before && Number(row.created_at) < (evidence.preparedAt ?? evidence.since)) return false
+    const turn = turnEvidence(transcript(options, row), { ...evidence, baselineBytes: before?.bytes ?? evidence.baselineBytes ?? 0 })
+    return turn.userObserved && (!turn.userTimestamp || Number(turn.userTimestamp) >= evidence.since)
+  })
   if (matches.length > 1) throw fail('AMBIGUOUS_SESSION', 'Multiple newly created sessions contain this task; no result was adopted.')
   return matches[0]
 }
-export async function send(options, { task, sessionId } = {}) {
+export async function send(options, { task, sessionId, requestId, requestedSettings } = {}) {
   if (typeof task !== 'string' || !task.trim()) throw fail('INVALID_ARGUMENT', 'task is empty')
+  const existing = existingRequest(options, requestId)
+  if (existing) {
+    if (existing.taskHash !== taskHash(task)) throw fail('REQUEST_CONFLICT', 'requestId already belongs to another task.')
+    return recover(options, { dispatchId: existing.dispatchId })
+  }
   await ready(options)
   const row = sessionId ? await resolveSession(options, sessionId) : undefined
-  if (row && ['active', 'running', 'pending'].includes(row.status)) throw fail('SESSION_BUSY', 'The target session already has an active task; no new task was sent.')
+  if (row && isBusy(row.status)) throw fail('SESSION_BUSY', 'The target session already has an active task; no new task was sent.')
   const baseline = row ? transcript(options, row) : undefined
   if (row && !baseline.path) throw fail('TRANSCRIPT_UNAVAILABLE', 'Cannot establish a transcript baseline; no task was sent.')
   if (row) await verifyVisible(options, row)
@@ -142,27 +148,97 @@ export async function send(options, { task, sessionId } = {}) {
     const state = await withWindow(options.port, 'main', dom.readState)
     if (state.view !== 'home') throw fail('SESSION_REQUIRED', 'Sending to a conversation requires its explicit session id.')
   }
+  const prior = existingRequest(options, requestId)
+  if (prior) {
+    if (prior.taskHash !== taskHash(task)) throw fail('REQUEST_CONFLICT', 'requestId already belongs to another task.')
+    return recover(options, { dispatchId: prior.dispatchId })
+  }
+  const preparedAt = Date.now()
+  const beforeResponse = await store.listSessions({ ...dbOptions(options), limit: 200 })
+  if (!beforeResponse.ok) throw fail('DB_UNAVAILABLE', 'Cannot establish session baselines; nothing sent.')
+  const beforeSessions = Object.fromEntries(beforeResponse.rows.map(r => {
+    const file = transcriptPath(r.id, r.cwd, dbOptions(options))
+    let bytes = 0
+    try { bytes = fs.statSync(file).size } catch { /* A reserved new session may not have a transcript yet. */ }
+    return [r.id, { bytes }]
+  }))
   const typed = await withWindow(options.port, 'main', connection => dom.typeTask(connection, task))
   if (typed.sendDisabled) throw fail('SEND_DISABLED', 'Composer is not ready; no task was sent.')
   // Immediately preceding the click: a historical completed flag is not this turn.
   const startedAt = Date.now()
-  const evidence = { task, since: startedAt, sessionId: row?.id, baselineBytes: baseline?.bytes ?? 0, baselineActivityAt: Math.max(Number(row?.updated_at) || 0, Number(row?.last_activity_at) || 0) }
-  await withWindow(options.port, 'main', dom.sendComposer)
+  const selectionAtSubmit = await withWindow(options.port, 'main', dom.readState)
+  delete selectionAtSubmit.composerText
+  const ticket = createTicket(options, { task, requestId, sessionId: row?.id, since: startedAt, preparedAt, beforeSessions, requestedSettings, baselineBytes: baseline?.bytes ?? 0, baselineActivityAt: Math.max(Number(row?.updated_at) || 0, Number(row?.last_activity_at) || 0) })
+  ticket.selectionAtSubmit = selectionAtSubmit
+  // Do not persist composer text (which may include private task data).
+  delete ticket.selectionAtSubmit.composerText
+  ticket.state = 'send-outcome-unknown'
+  saveTicket(options, ticket)
+  try { await withWindow(options.port, 'main', dom.sendComposer) }
+  catch (error) { ticket.lastError = error.message; saveTicket(options, ticket); return pendingTicket(ticket) }
+  ticket.state = 'pending-observation'
+  saveTicket(options, ticket)
   if (!row) {
     const deadline = Date.now() + 20000
-    while (Date.now() < deadline && !evidence.sessionId) {
-      const adopted = await adoptNewSession(options, evidence)
-      if (adopted) evidence.sessionId = adopted.id
+    while (Date.now() < deadline && !ticket.sessionId) {
+      let adopted
+      try { adopted = await adoptNewSession(options, ticket) } catch (error) { ticket.lastError = error.message; saveTicket(options, ticket); break }
+      if (adopted) {
+        ticket.sessionId = adopted.id
+        ticket.baselineBytes = beforeSessions[adopted.id]?.bytes ?? 0
+        observe(ticket, adopted, 'bound')
+      }
       else await sleep(700)
     }
   }
-  if (!evidence.sessionId) return { ok: false, code: 'SESSION_NOT_OBSERVED', text: 'Task was sent, but its new session is not yet verified. Do not resend automatically.', typed, startedAt, evidence }
-  return { ok: true, text: `Task sent to ${evidence.sessionId}.`, typed, startedAt, sessionId: evidence.sessionId, evidence }
+  if (!ticket.sessionId) return pendingTicket(saveTicket(options, ticket))
+  ticket.state = 'bound'
+  saveTicket(options, ticket)
+  return { ok: true, text: `Task sent to ${ticket.sessionId}.`, startedAt, dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), selectionAtSubmit: ticket.selectionAtSubmit }
 }
-export async function waitForRun(options, { sessionId, timeoutSec, evidence } = {}) {
+function pendingTicket(ticket) {
+  return { ok: true, status: 'pending-observation', submitted: ticket.state === 'send-outcome-unknown' ? null : ticket.state !== 'prepared', sendState: ticket.state, needsRecovery: true, text: 'Recover with dispatchId before considering another send. The durable ticket preserves the send state and attribution.', dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), startedAt: ticket.since }
+}
+export async function recover(options, { dispatchId, sessionId, evidence } = {}) {
+  let ticket
+  if (dispatchId) ticket = loadTicket(options, dispatchId)
+  else {
+    if (!evidence?.task || !Number.isFinite(evidence.since) || !sessionId) throw fail('INVALID_EVIDENCE', 'Legacy recovery requires the original task evidence and an explicit sessionId.')
+    const row = await resolveSession(options, sessionId)
+    const turn = turnEvidence(transcript(options, row), evidence)
+    if (!turn.userObserved || !turn.userTimestamp || Number(turn.userTimestamp) < evidence.since) throw fail('RECOVERY_NOT_VERIFIED', 'Legacy evidence does not match a recorded user turn after send.')
+    ticket = createTicket(options, { task: evidence.task, ...evidence, sessionId: row.id, source: 'verified-legacy-recovery' })
+  }
+  if (sessionId && ticket.sessionId && ticket.sessionId !== sessionId) throw fail('INVALID_EVIDENCE', 'Dispatch is already bound to another session.')
+  const row = ticket.sessionId ? await resolveSession(options, ticket.sessionId) : sessionId ? await resolveSession(options, sessionId) : await adoptNewSession(options, ticket)
+  if (!row) return pendingTicket(ticket)
+  const baselineBytes = ticket.beforeSessions?.[row.id]?.bytes ?? ticket.baselineBytes
+  const turn = turnEvidence(transcript(options, row), { ...ticket, baselineBytes }, {allowSuperseded:true})
+  if (!turn.userObserved && ticket.sessionId === row.id) return pendingTicket(ticket)
+  if (!turn.userObserved || turn.userTimestamp && Number(turn.userTimestamp) < ticket.since) throw fail('RECOVERY_NOT_VERIFIED', 'Session has no matching new user turn for this dispatch.')
+  ticket.sessionId = row.id
+  ticket.baselineBytes = baselineBytes
+  ticket.userMessageId = turn.userId
+  ticket.state = turn.superseded ? 'superseded' : isBusy(row.status) ? 'working' : row.status
+  ticket.superseded = turn.superseded
+  observe(ticket, row, 'recovered')
+  saveTicket(options, ticket)
+  return { ok: true, text: `Recovered dispatch ${ticket.dispatchId} and session ${row.id}.`, dispatchId: ticket.dispatchId, sessionId: row.id, status: ticket.state, superseded:turn.superseded, evidence: evidenceOf(ticket), observations: ticket.observations, selectionAtSubmit: ticket.selectionAtSubmit, wallElapsedMs: Date.now()-ticket.since, hostWaitElapsedMs: ticket.hostWaitElapsedMs ?? 0, lastProgressObservedAt: ticket.lastProgressObservedAt, usage: 'NOT_MEASURED', backendModel: 'NOT_INDEPENDENTLY_OBSERVED', modelMetadataNote: 'Global/session metadata can change with other tasks; this is not proof that the running backend model changed.' }
+}
+export async function waitForRun(options, { sessionId, timeoutSec, evidence, dispatchId } = {}) {
+  let ticket
+  if (dispatchId || evidence?.dispatchId) {
+    const recovered = await recover(options, { dispatchId: dispatchId ?? evidence.dispatchId, sessionId })
+    if (recovered.needsRecovery) return { ...recovered, done: false }
+    evidence = recovered.evidence
+    sessionId = recovered.sessionId
+    ticket = loadTicket(options, evidence.dispatchId)
+  }
   const row = await resolveSession(options, sessionId)
   if (evidence && evidence.sessionId !== row.id) throw fail('INVALID_EVIDENCE', 'evidence sessionId must match the target session.')
-  if (evidence && (!Number.isSafeInteger(evidence.baselineBytes) || evidence.baselineBytes < 0 || !evidence.task)) throw fail('INVALID_EVIDENCE', 'Invalid turn evidence.')
+  if (evidence && (!Number.isSafeInteger(evidence.baselineBytes) || evidence.baselineBytes < 0 || (!evidence.task && !evidence.taskHash))) throw fail('INVALID_EVIDENCE', 'Invalid turn evidence.')
+  const waitStartedAt = Date.now()
+  let sampleAt = waitStartedAt
   const deadline = Date.now() + (timeoutSec ?? options.waitTimeoutSec) * 1000
   let last = row
   let activeObserved = false
@@ -170,17 +246,53 @@ export async function waitForRun(options, { sessionId, timeoutSec, evidence } = 
     const response = await store.getSession(row.id, dbOptions(options))
     if (!response.ok || !response.row) throw fail('DB_UNAVAILABLE', response.error ?? 'Session disappeared.')
     last = response.row
-    if (['active', 'running', 'pending'].includes(last.status)) activeObserved = true
+    if (isBusy(last.status)) activeObserved = true
     const log = transcript(options, last)
-    const turn = evidence ? turnEvidence(log, evidence) : { userObserved: true, answer: log.lastAssistant }
+    const turn = evidence ? turnEvidence(log, evidence, {allowSuperseded:true}) : { userObserved: true, answer: log.lastAssistant }
+    if (turn.superseded) return {done:true,status:'superseded',sessionId:last.id,row:last,turn}
+    if (ticket) {
+      ticket = loadTicket(options, ticket.dispatchId)
+      if (ticket.lastProgressBytes !== log.bytes) { ticket.lastProgressBytes = log.bytes; ticket.lastProgressObservedAt = Date.now() }
+      ticket.state = last.status
+      observe(ticket, last, 'wait')
+      ticket.hostWaitElapsedMs = (ticket.hostWaitElapsedMs ?? 0) + Date.now() - sampleAt
+      sampleAt = Date.now()
+      saveTicket(options, ticket)
+    }
     const activity = Math.max(Number(last.updated_at) || 0, Number(last.last_activity_at) || 0)
     const freshStatus = !evidence || evidence.baselineBytes === 0 || activeObserved || activity >= evidence.since && activity > (evidence.baselineActivityAt ?? 0)
     if (last.status === 'error' && freshStatus && turn.userObserved) return { done: true, status: 'error', sessionId: last.id, row: last, turn }
     if (last.status === 'completed' && freshStatus && turn.userObserved && turn.answer) return { done: true, status: 'completed', sessionId: last.id, row: last, turn }
+    if (['cancelled','canceled','interrupted','aborted'].includes(last.status) && turn.userObserved) return { done: true, status: last.status, sessionId: last.id, row: last, turn }
     if (Date.now() >= deadline) break
     await sleep(Math.min(1000, Math.max(1, deadline - Date.now())))
   } while (Date.now() <= deadline)
   return { done: false, status: last.status, sessionId: last.id, row: last }
+}
+
+export async function cancel(options, { dispatchId } = {}) {
+  const recovered = await recover(options, { dispatchId })
+  if (recovered.needsRecovery) return { ok: false, code: 'SESSION_NOT_OBSERVED', text: 'Recover a verified session before interrupting.', dispatchId }
+  const ticket = loadTicket(options, dispatchId)
+  if (ticket.superseded) throw fail('TURN_SUPERSEDED', 'A newer turn owns this session; no interrupt was sent.')
+  const row = await resolveSession(options, ticket.sessionId)
+  if (!isBusy(row.status)) return { ok: true, text: `No interrupt sent: session is ${row.status}.`, status: row.status, dispatchId, sessionId: row.id, requested: false }
+  if (!await debuggerVersion(options.port)) throw fail('NO_PORT', 'Cancel requires the existing debug connection; no restart or kill was attempted.')
+  await open({ ...options, autoRestart:false }, { session: row.id })
+  // Recheck immediately before clicking stop; never interrupt a superseding turn.
+  turnEvidence(transcript(options, row), ticket)
+  const request = await withWindow(options.port, 'main', connection => dom.stopTurn(connection, row.id))
+  ticket.cancelRequestedAt = Date.now()
+  ticket.state = 'cancel-requested'
+  saveTicket(options, ticket)
+  const until = Date.now() + 3000
+  let after = row
+  while (Date.now() < until) {
+    after = await resolveSession(options, row.id)
+    if (!isBusy(after.status)) break
+    await sleep(300)
+  }
+  return { ok: true, text: isBusy(after.status) ? 'Interrupt requested; stop is not yet confirmed.' : `Interrupt requested; observed status ${after.status}.`, dispatchId, sessionId: row.id, requested: request.requested, confirmed: !isBusy(after.status), status: after.status }
 }
 
 function digest(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') }
@@ -200,7 +312,8 @@ export function copyCandidate(source, outputDir, cwd) {
   fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL)
   return { from: source, to: target }
 }
-export async function collect(options, { sessionId, outputDir, mode = 'auto', since, answer } = {}) {
+export async function collect(options, { sessionId, outputDir, mode = 'auto', since, answer, allowedOutputDirs = [] } = {}) {
+  if (mode === 'copy' && (!outputDir || !allowedOutputDirs.length)) throw fail('COPY_ROOTS_REQUIRED', 'Copy requires outputDir and explicit allowedOutputDirs source roots.')
   const row = await resolveSession(options, sessionId)
   const log = transcript(options, row)
   const textAnswer = answer ?? log.lastAssistant
@@ -216,7 +329,10 @@ export async function collect(options, { sessionId, outputDir, mode = 'auto', si
       if (!candidates.has(absolute)) candidates.set(absolute, { path: absolute, evidence: 'referenced-in-transcript; output-unverified' })
     } catch { /* Missing referenced files are not deliverables. */ }
   }
-  const files = [...candidates.values()]
+  const isAllowed = file => allowedOutputDirs.some(root => {
+    try { const relative=path.relative(fs.realpathSync(root),fs.realpathSync(file));return relative==='' || (!relative.startsWith('..')&&!path.isAbsolute(relative)) } catch { return false }
+  })
+  const files = [...candidates.values()].filter(file => !allowedOutputDirs.length || isAllowed(file.path))
   const copies = []
   if (mode === 'copy' && outputDir && row.cwd) {
     for (const file of files) {
@@ -232,21 +348,28 @@ export async function collect(options, { sessionId, outputDir, mode = 'auto', si
     fs.writeFileSync(summaryPath, `# WorkBuddy result\n\n${lines.join('\n')}\n`, { encoding: 'utf8', flag: 'wx' })
     lines.push(`summary: ${summaryPath}`)
   }
-  return { ok: copies.every(copy => !copy.error), text: lines.join('\n'), sessionId: row.id, answer: textAnswer, files, originals: files.map(file => file.path), copies, cwd: row.cwd, summaryPath }
+  return { ok: copies.every(copy => !copy.error), text: lines.join('\n'), sessionId: row.id, answer: textAnswer, files, categories: { modifiedCandidates: files.filter(f=>f.evidence.startsWith('modified')), referencedCandidates: files.filter(f=>f.evidence.startsWith('referenced')), independentlyAttributedOutputs: [], attribution: 'NOT_ESTABLISHED_BY_PATHS_OR_TIMESTAMPS' }, originals: files.map(file => file.path), copies, cwd: row.cwd, summaryPath }
 }
 export async function run(options, args = {}) {
   const trace = []
+  const previous = existingRequest(options, args.requestId)
+  if (previous) {
+    if (previous.taskHash !== taskHash(args.task)) throw fail('REQUEST_CONFLICT', 'requestId belongs to another task.')
+    return recover(options, { dispatchId: previous.dispatchId })
+  }
   if (args.restart) { await ready(options, { restart: true }); trace.push('restarted with explicit request') }
   const opened = await open(options, { session: args.session ?? 'new' })
   trace.push(opened.text)
   const configured = await configure(options, args)
   trace.push(configured.text)
-  const sent = await send(options, { task: args.task, sessionId: opened.row?.id })
+  const sent = await send(options, { task: args.task, sessionId: opened.row?.id, requestId: args.requestId, requestedSettings: { model: args.model, effort: args.effort, contextK: args.contextK, expert: args.expert } })
   trace.push(sent.text)
-  if (!sent.ok) return { ...sent, trace }
-  const waited = await waitForRun(options, { sessionId: sent.sessionId, timeoutSec: args.timeoutSec, evidence: sent.evidence })
+  if (!sent.ok || sent.needsRecovery) return { ...sent, trace }
+  let waited
+  try { waited = await waitForRun(options, { sessionId: sent.sessionId, timeoutSec: args.timeoutSec, evidence: sent.evidence }) }
+  catch (error) { return { ...sent, ok:false, code:error.code??'OBSERVATION_ERROR', text:`Send completed; observation failed: ${error.message}. Recover the existing dispatch; do not resend.`,trace } }
   trace.push(waited.done ? waited.status : 'timeout; WorkBuddy may still be running')
-  if (!waited.done) return { ok: false, code: 'WAIT_TIMEOUT', text: trace.join('\n'), sessionId: sent.sessionId, evidence: sent.evidence, status: waited.status, done: false, trace }
-  const collected = await collect(options, { sessionId: sent.sessionId, since: sent.startedAt, outputDir: args.outputDir, mode: args.mode, answer: waited.turn.answer ?? '' })
-  return { ...collected, ok: waited.status === 'completed' && collected.ok, text: `${trace.join('\n')}\n\n${collected.text}`, sessionId: sent.sessionId, evidence: sent.evidence, status: waited.status, done: true, trace }
+  if (!waited.done) return { ok: true, status: 'waiting', text: trace.join('\n'), dispatchId: sent.dispatchId, sessionId: sent.sessionId, evidence: sent.evidence, observedStatus: waited.status, done: false, trace }
+  const collected = await collect(options, { sessionId: sent.sessionId, since: sent.startedAt, outputDir: args.outputDir, mode: args.mode, allowedOutputDirs: args.allowedOutputDirs, answer: waited.turn.answer ?? '' })
+  return { ...collected, ok: waited.status === 'completed' && collected.ok, text: `${trace.join('\n')}\n\n${collected.text}`, dispatchId: sent.dispatchId, sessionId: sent.sessionId, evidence: sent.evidence, status: waited.status, done: true, trace }
 }
