@@ -9,6 +9,8 @@ import * as store from './store.js'
 import { DB_PATH, transcriptPath } from './paths.js'
 import helperPath from './helper-path.js'
 import { isBusy, taskHash, createTicket, saveTicket, loadTicket, existingRequest, evidenceOf, observe } from './dispatch.js'
+import {callerContext,scopeForCall,chooseSession,executionDefaults,rememberCall,readBinding,writeBinding,scopeRequest} from './routing.js'
+import * as projects from './projects.js'
 
 const fail = (code, text) => Object.assign(new Error(text), { code })
 const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim()
@@ -91,9 +93,14 @@ export async function configure(options, { model, effort, contextK, expert } = {
     const applied = []
     // Summoning an expert can reset the home composer; select the model after it.
     if (expert !== undefined) {
-      if (before.view !== 'home') throw fail('EXPERT_REQUIRES_NEW', 'Experts can only be selected on a new task; nothing sent.')
-      const result = await dom.summonExpert(connection, expert)
-      applied.push(`expert: ${result.summoned}`)
+      if (before.view !== 'home') {
+        const expected=expert==='吴八哥'?'高级开发工程师':expert
+        if(!before.chips.some(chip=>chip.includes(expected)))throw fail('EXPERT_REQUIRES_NEW', 'The existing session does not have the requested expert; start a new task in the mapped project.')
+        applied.push(`expert retained: ${expert}`)
+      } else {
+        const result = await dom.summonExpert(connection, expert)
+        applied.push(`expert: ${result.summoned}`)
+      }
     }
     if (model !== undefined) { await dom.selectModel(connection, model); applied.push(`model: ${model}`) }
     const current = await dom.readState(connection)
@@ -131,7 +138,7 @@ export async function adoptNewSession(options, evidence) {
   if (matches.length > 1) throw fail('AMBIGUOUS_SESSION', 'Multiple newly created sessions contain this task; no result was adopted.')
   return matches[0]
 }
-export async function send(options, { task, sessionId, requestId, requestedSettings } = {}) {
+export async function send(options, { task, sessionId, requestId, requestedSettings, routing } = {}) {
   if (typeof task !== 'string' || !task.trim()) throw fail('INVALID_ARGUMENT', 'task is empty')
   const existing = existingRequest(options, requestId)
   if (existing) {
@@ -168,7 +175,7 @@ export async function send(options, { task, sessionId, requestId, requestedSetti
   const startedAt = Date.now()
   const selectionAtSubmit = await withWindow(options.port, 'main', dom.readState)
   delete selectionAtSubmit.composerText
-  const ticket = createTicket(options, { task, requestId, sessionId: row?.id, since: startedAt, preparedAt, beforeSessions, requestedSettings, baselineBytes: baseline?.bytes ?? 0, baselineActivityAt: Math.max(Number(row?.updated_at) || 0, Number(row?.last_activity_at) || 0) })
+  const ticket = createTicket(options, { task, requestId, sessionId: row?.id, since: startedAt, preparedAt, beforeSessions, requestedSettings, routing, composerVerification:{prefillRemoved:typed.prefillRemoved,clearedBeforeInsert:typed.clearedBeforeInsert,exactMatchVerified:typed.exactMatchVerified}, baselineBytes: baseline?.bytes ?? 0, baselineActivityAt: Math.max(Number(row?.updated_at) || 0, Number(row?.last_activity_at) || 0) })
   ticket.selectionAtSubmit = selectionAtSubmit
   // Do not persist composer text (which may include private task data).
   delete ticket.selectionAtSubmit.composerText
@@ -194,10 +201,10 @@ export async function send(options, { task, sessionId, requestId, requestedSetti
   if (!ticket.sessionId) return pendingTicket(saveTicket(options, ticket))
   ticket.state = 'bound'
   saveTicket(options, ticket)
-  return { ok: true, text: `Task sent to ${ticket.sessionId}.`, startedAt, dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), selectionAtSubmit: ticket.selectionAtSubmit }
+  return { ok: true, text: `Task sent to ${ticket.sessionId}.`, startedAt, dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), selectionAtSubmit: ticket.selectionAtSubmit,composerVerification:ticket.composerVerification,routing:ticket.routing }
 }
 function pendingTicket(ticket) {
-  return { ok: true, status: 'pending-observation', submitted: ticket.state === 'send-outcome-unknown' ? null : ticket.state !== 'prepared', sendState: ticket.state, needsRecovery: true, text: 'Recover with dispatchId before considering another send. The durable ticket preserves the send state and attribution.', dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), startedAt: ticket.since }
+  return { ok: true, status: 'pending-observation', submitted: ticket.state === 'send-outcome-unknown' ? null : ticket.state !== 'prepared', sendState: ticket.state, needsRecovery: true, text: 'Recover with dispatchId before considering another send. The durable ticket preserves the send state and attribution.', dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), startedAt: ticket.since,routing:ticket.routing,composerVerification:ticket.composerVerification }
 }
 export async function recover(options, { dispatchId, sessionId, evidence } = {}) {
   let ticket
@@ -223,7 +230,7 @@ export async function recover(options, { dispatchId, sessionId, evidence } = {})
   ticket.superseded = turn.superseded
   observe(ticket, row, 'recovered')
   saveTicket(options, ticket)
-  return { ok: true, text: `Recovered dispatch ${ticket.dispatchId} and session ${row.id}.`, dispatchId: ticket.dispatchId, sessionId: row.id, status: ticket.state, superseded:turn.superseded, evidence: evidenceOf(ticket), observations: ticket.observations, selectionAtSubmit: ticket.selectionAtSubmit, wallElapsedMs: Date.now()-ticket.since, hostWaitElapsedMs: ticket.hostWaitElapsedMs ?? 0, lastProgressObservedAt: ticket.lastProgressObservedAt, usage: 'NOT_MEASURED', backendModel: 'NOT_INDEPENDENTLY_OBSERVED', modelMetadataNote: 'Global/session metadata can change with other tasks; this is not proof that the running backend model changed.' }
+  return { ok: true, text: `Recovered dispatch ${ticket.dispatchId} and session ${row.id}.`, dispatchId: ticket.dispatchId, sessionId: row.id, status: ticket.state, superseded:turn.superseded, evidence: evidenceOf(ticket), observations: ticket.observations, selectionAtSubmit: ticket.selectionAtSubmit,routing:ticket.routing,composerVerification:ticket.composerVerification, wallElapsedMs: Date.now()-ticket.since, hostWaitElapsedMs: ticket.hostWaitElapsedMs ?? 0, lastProgressObservedAt: ticket.lastProgressObservedAt, usage: 'NOT_MEASURED', backendModel: 'NOT_INDEPENDENTLY_OBSERVED', modelMetadataNote: 'Global/session metadata can change with other tasks; this is not proof that the running backend model changed.' }
 }
 export async function waitForRun(options, { sessionId, timeoutSec, evidence, dispatchId } = {}) {
   let ticket
@@ -350,26 +357,90 @@ export async function collect(options, { sessionId, outputDir, mode = 'auto', si
   }
   return { ok: copies.every(copy => !copy.error), text: lines.join('\n'), sessionId: row.id, answer: textAnswer, files, categories: { modifiedCandidates: files.filter(f=>f.evidence.startsWith('modified')), referencedCandidates: files.filter(f=>f.evidence.startsWith('referenced')), independentlyAttributedOutputs: [], attribution: 'NOT_ESTABLISHED_BY_PATHS_OR_TIMESTAMPS' }, originals: files.map(file => file.path), copies, cwd: row.cwd, summaryPath }
 }
-export async function run(options, args = {}) {
+export async function projectControl(options,args={}) {
+  const caller=callerContext(args,options)
+  const scope=scopeForCall(options,caller,args)
+  const binding=scope.binding
+  if((args.action??'get')==='get')return {ok:true,exists:!!binding.project,caller,scopeKey:scope.key,project:binding.project,lastTask:binding.threads[caller.conversationId]??null,defaults:executionDefaults({taskKind:args.taskKind??'general'})}
+  if(args.action==='rename'&&!args.projectName)throw fail('INVALID_ARGUMENT','rename requires projectName.')
+  const project=await projects.ensureProject(options,caller,binding,args)
+  const base=scope.key===caller.baseScope?binding:readBinding(options,caller.baseScope)
+  base.threads[caller.conversationId]={...base.threads[caller.conversationId],activeScope:scope.key}
+  writeBinding(options,base)
+  let membership
+  if(args.action==='attach') {
+    if(!args.dispatchId)throw fail('INVALID_ARGUMENT','attach requires dispatchId.')
+    const recovered=await recover(options,{dispatchId:args.dispatchId})
+    if(recovered.needsRecovery)return recovered
+    if(recovered.routing?.scopeKey!==scope.key||recovered.routing?.conversationId!==caller.conversationId)throw fail('CALLER_SCOPE_CONFLICT','Dispatch does not belong to this caller mapping; no project assignment changed.')
+    await ready(options)
+    membership=await projects.ensureMembership(options,recovered.sessionId,project)
+  }
+  return {ok:true,text:`Mapped ${scope.key} to ${project.name}.`,caller,scopeKey:scope.key,project,membership}
+}
+export async function run(options, args = {}, {sendOnly=false}={}) {
   const trace = []
+  args=scopeRequest(args,options)
   const previous = existingRequest(options, args.requestId)
   if (previous) {
     if (previous.taskHash !== taskHash(args.task)) throw fail('REQUEST_CONFLICT', 'requestId belongs to another task.')
     return recover(options, { dispatchId: previous.dispatchId })
   }
+  args=executionDefaults(args)
+  let caller,scope,binding,project,plan
+  if(args.routing!=='manual')caller=callerContext(args,options)
   if (args.restart) { await ready(options, { restart: true }); trace.push('restarted with explicit request') }
-  const opened = await open(options, { session: args.session ?? 'new' })
+  if(args.routing!=='manual') {
+    scope=scopeForCall(options,caller,args)
+    binding=scope.binding
+    project=await projects.ensureProject(options,caller,binding,args)
+    const last=binding.threads[caller.conversationId]
+    if(last?.lastDispatchId&&(!args.session||args.session==='auto')&&!['unrelated','different-project'].includes(args.relationship)) {
+      const restored=await recover(options,{dispatchId:last.lastDispatchId})
+      if(restored.needsRecovery)return {...restored,text:'Previous submission is still being observed. Recover it before another related send.',project}
+      last.lastSessionId=restored.sessionId
+      writeBinding(options,binding)
+    }
+    plan=chooseSession(binding,caller,args)
+    if(plan.session!=='new') {
+      let row
+      try {row=await resolveSession(options,plan.session)} catch(error) {
+        if((!args.session||args.session==='auto')&&error.code==='SESSION_NOT_FOUND')plan={session:'new',reason:'previous-session-deleted'}
+        else throw error
+      }
+      if(row) {
+        plan.session=row.id
+        if(isBusy(row.status))return {ok:false,code:'SESSION_BUSY',text:'The mapped previous task is still running. Wait/cancel it, or explicitly request an unrelated new task.',sessionId:row.id,dispatchId:last?.lastDispatchId,project,route:plan}
+        const actual=await projects.sessionProject(options,row.id)
+        if(actual.space_id!==project.id) {
+          if(last?.lastSessionId!==row.id)throw fail('SESSION_PROJECT_CONFLICT','Explicit session belongs to another project. Use routing:manual for an intentional external session.')
+          await ready(options)
+          await projects.ensureMembership(options,row.id,project)
+        }
+      }
+    }
+    trace.push(`project: ${project.name}; routing: ${plan.reason}`)
+  } else plan={session:args.session&&args.session!=='auto'?args.session:'new',reason:'manual-routing'}
+  const opened = project&&plan.session==='new' ? await projects.openProjectTask(options,project) : await open(options, { session: plan.session })
   trace.push(opened.text)
   const configured = await configure(options, args)
   trace.push(configured.text)
-  const sent = await send(options, { task: args.task, sessionId: opened.row?.id, requestId: args.requestId, requestedSettings: { model: args.model, effort: args.effort, contextK: args.contextK, expert: args.expert } })
+  const routing=project?{scopeKey:scope.key,conversationId:caller.conversationId,project,decision:plan}:undefined
+  const sent = await send(options, { task: args.task, sessionId: opened.row?.id, requestId: args.requestId,routing, requestedSettings: { model: args.model, effort: args.effort, contextK: args.contextK, expert: args.expert } })
   trace.push(sent.text)
-  if (!sent.ok || sent.needsRecovery) return { ...sent, trace }
+  if(project&&sent.dispatchId)rememberCall(options,caller,scope.key,binding,{...args,resolvedSession:plan.session},sent)
+  const routed={...sent,project,route:plan,resolvedDefaults:{model:args.model,effort:args.effort,contextK:args.contextK,expert:args.expert,taskKind:args.taskKind}}
+  if (!sent.ok || sent.needsRecovery) return { ...routed, trace }
+  if(project) {
+    try {routed.membership=await projects.ensureMembership(options,sent.sessionId,project)}
+    catch(error) {return {...routed,ok:false,code:'PROJECT_ASSIGNMENT_PENDING',text:`Task was sent. Project assignment needs repair: ${error.message}. Use workbuddy_project(action:attach,dispatchId); do not resend.`,trace}}
+  }
+  if(sendOnly&&!(args.waitSeconds>0))return {...routed,trace}
   let waited
-  try { waited = await waitForRun(options, { sessionId: sent.sessionId, timeoutSec: args.timeoutSec, evidence: sent.evidence }) }
-  catch (error) { return { ...sent, ok:false, code:error.code??'OBSERVATION_ERROR', text:`Send completed; observation failed: ${error.message}. Recover the existing dispatch; do not resend.`,trace } }
+  try { waited = await waitForRun(options, { sessionId: sent.sessionId, timeoutSec: sendOnly?args.waitSeconds:args.timeoutSec, evidence: sent.evidence }) }
+  catch (error) { return { ...routed, ok:false, code:error.code??'OBSERVATION_ERROR', text:`Send completed; observation failed: ${error.message}. Recover the existing dispatch; do not resend.`,trace } }
   trace.push(waited.done ? waited.status : 'timeout; WorkBuddy may still be running')
-  if (!waited.done) return { ok: true, status: 'waiting', text: trace.join('\n'), dispatchId: sent.dispatchId, sessionId: sent.sessionId, evidence: sent.evidence, observedStatus: waited.status, done: false, trace }
+  if (!waited.done) return {...routed, ok: true, status: 'waiting', text: trace.join('\n'), observedStatus: waited.status, done: false, trace }
   const collected = await collect(options, { sessionId: sent.sessionId, since: sent.startedAt, outputDir: args.outputDir, mode: args.mode, allowedOutputDirs: args.allowedOutputDirs, answer: waited.turn.answer ?? '' })
-  return { ...collected, ok: waited.status === 'completed' && collected.ok, text: `${trace.join('\n')}\n\n${collected.text}`, dispatchId: sent.dispatchId, sessionId: sent.sessionId, evidence: sent.evidence, status: waited.status, done: true, trace }
+  return { ...routed,...collected, ok: waited.status === 'completed' && collected.ok, text: `${trace.join('\n')}\n\n${collected.text}`, dispatchId: sent.dispatchId, sessionId: sent.sessionId, evidence: sent.evidence, status: waited.status, done: true, trace }
 }

@@ -23,15 +23,15 @@ test('stdio handshake, discovery, invalid arguments and RPC errors use JSON only
   const rows = result.stdout.trim().split('\n').map(line => JSON.parse(line))
   assert.equal(rows.length, 5)
   assert.equal(rows.find(row => row.id === 1).result.protocolVersion, '2025-06-18')
-  assert.equal(rows.find(row => row.id === 2).result.tools.length, 12)
+  assert.equal(rows.find(row => row.id === 2).result.tools.length, 13)
   assert.equal(rows.find(row => row.id === 3).result.structuredContent.code, 'INVALID_ARGUMENT')
   assert.equal(rows.find(row => row.id === 3).result.isError, true)
   assert.equal(rows.find(row => row.id === 4).error.code, -32601)
   assert.ok(rows.some(row => row.error?.code === -32700))
 })
 test('CLI lists tools and rejects malformed or incomplete invocations', () => {
-  assert.equal(JSON.parse(child('bin/cli.mjs', ['tools']).stdout).length, 12)
-  const result = child('bin/cli.mjs', ['call', 'workbuddy_send', '{"task":"hello"}'])
+  assert.equal(JSON.parse(child('bin/cli.mjs', ['tools']).stdout).length, 13)
+  const result = child('bin/cli.mjs', ['call', 'workbuddy_send', '{}'])
   assert.equal(result.status, 1); assert.equal(JSON.parse(result.stdout).code, 'INVALID_ARGUMENT')
 })
 test('a failed synthetic DB read is returned as a tool error without launching UI', async t => {
@@ -43,7 +43,7 @@ test('a failed synthetic DB read is returned as a tool error without launching U
 })
 test('unsafe stateful calls and accidental copies fail before taking a lock', async t => {
   const f = fixture(t); const bridge = createBridge({ dbPath: f.dbPath, lockPath: f.lockPath })
-  for (const [name, args] of [['workbuddy_run', { task: '' }], ['workbuddy_send', { task: 'x' }], ['workbuddy_collect', { sessionId: 'a', mode: 'copy' }], ['workbuddy_status', { restart: true, launch: false }], ['workbuddy_sessions', { limit: -1 }]]) {
+  for (const [name, args] of [['workbuddy_run', { task: '' }], ['workbuddy_send', {}], ['workbuddy_collect', { sessionId: 'a', mode: 'copy' }], ['workbuddy_status', { restart: true, launch: false }], ['workbuddy_sessions', { limit: -1 }]]) {
     assert.equal((await bridge.callTool(name, args)).code, 'INVALID_ARGUMENT')
   }
   assert.equal(fs.existsSync(f.lockPath), false)

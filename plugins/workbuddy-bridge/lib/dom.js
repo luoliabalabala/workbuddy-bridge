@@ -741,7 +741,7 @@ async function composerPoint(connection) {
     if (!editor) return null
     editor.scrollIntoView({ block: 'center' })
     const box = editor.getBoundingClientRect()
-    return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
+    return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2), hadText: textOf(editor).length > 0 }
   `)
 }
 
@@ -757,7 +757,7 @@ export async function typeTask(connection, text) {
   await settle(120)
   await connection.insertText(text)
   await settle(250)
-  const state = await pageEval(connection, `
+  let state = await pageEval(connection, `
     const editor = pick('.conversation-input__box [contenteditable="true"]')
       || pick('.cr-input-box [contenteditable="true"]')
       || pick('._editable_1cxd2_1')
@@ -776,13 +776,15 @@ export async function typeTask(connection, text) {
         || pick('.cr-input-box [contenteditable="true"]')
         || pick('._editable_1cxd2_1')
         || pick('[role="textbox"][contenteditable="true"]')
-      return textOf(editor)
+      const btn=pick('.cr-send-button')
+      return {text:textOf(editor),sendDisabled:btn ? btn.hasAttribute('disabled')||btn.className.includes('disabled') : true}
     `)
-    if (normalized(again) !== normalized(text)) {
-      throw new Error(`composer content mismatch: wanted ${JSON.stringify(text.slice(0, 60))}…, got ${JSON.stringify(String(again).slice(0, 60))}…`)
+    if (normalized(again.text) !== normalized(text)) {
+      throw new Error('Composer did not match the complete requested task after replacing its prefill; no message was sent.')
     }
+    state=again
   }
-  return { text: state.text, sendDisabled: state.sendDisabled }
+  return { text: state.text, sendDisabled: state.sendDisabled, prefillRemoved:point.hadText, clearedBeforeInsert:true,exactMatchVerified:true }
 }
 
 /** Submit whatever the composer holds. */
@@ -821,4 +823,96 @@ export async function readConversation(connection) {
       errorBanner: textOf(pick('.cr-error, [class*="errorBanner"]')) || undefined,
     }
   `)
+}
+
+async function modalProjectName(connection,name) {
+  const point=await pageEval(connection,`const input=pick('.space-editor-modal input[aria-label="分组名称"]');return input?center(input):null`)
+  if(!point)throw new Error('Project-name input not found in the native group editor.')
+  await pageEval(connection,`const input=pick('.space-editor-modal input[aria-label="分组名称"]');if(!input)throw new Error('Project input not found');input.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(name)});input.dispatchEvent(new Event('input',{bubbles:true}));return true`)
+  await settle(250)
+  const accepted=await pageEval(connection,`return pick('.space-editor-modal input[aria-label="分组名称"]')?.value===${JSON.stringify(name)}`)
+  if(!accepted) {
+    await pageEval(connection,`const input=pick('.space-editor-modal input[aria-label="分组名称"]');if(input){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(name)});input.dispatchEvent(new Event('input',{bubbles:true}))}return true`)
+    await settle(200)
+  }
+  const save=await waitForPage(connection,`(()=>{
+    const modal=document.querySelector('.space-editor-modal')
+    const input=modal?.querySelector('input[aria-label="分组名称"]')
+    if(input?.value!==${JSON.stringify(name)})return null
+    const button=[...modal.querySelectorAll('button')].find(b=>textOf(b)==='保存'&&!b.disabled&&!b.className.includes('--disabled'))
+    return button?center(button):null
+  })()`,{timeoutMs:8000,label:'project name accepted and save enabled'})
+  if(!save)throw new Error('Native project editor did not accept the requested name.')
+  await pageEval(connection,`const modal=document.querySelector('.space-editor-modal');const button=[...modal?.querySelectorAll('button')??[]].find(b=>textOf(b)==='保存'&&!b.disabled);if(!button)throw new Error('Project save button unavailable');button.click();return true`)
+  await waitForPage(connection,`!document.querySelector('.space-editor-modal')`,{label:'project saved'})
+}
+export async function createProject(connection,name) {
+  const busy=await pageEval(connection,`return !!document.querySelector('.space-editor-modal,[role="dialog"]')`)
+  if(busy) {
+    const resumable=await pageEval(connection,`const m=document.querySelector('.space-editor-modal');return !!m&&textOf(m.querySelector('.wb-modal__title'))==='新建分组'&&m.querySelector('input')?.value===${JSON.stringify(name)}`)
+    if(!resumable)throw new Error('An existing dialog is open; bridge did not overwrite its fields.')
+    await modalProjectName(connection,name)
+    return {name,resumed:true}
+  }
+  await connection.key(['Escape'])
+  const activated=await pageEval(connection,`const add=document.querySelector('.conversation-section-add-btn');if(!add)return false;add.scrollIntoView({block:'nearest'});add.click();return true`)
+  if(!activated)throw new Error('WorkBuddy group/project creation control not found.')
+  await waitForPage(connection,`!!pick('.space-editor-modal input[aria-label="分组名称"]')`,{label:'new project editor'})
+  await modalProjectName(connection,name)
+  return {name}
+}
+export async function renameProject(connection,id,name) {
+  await connection.key(['Escape'])
+  const opened=await pageEval(connection,`
+    const header=document.querySelector(${JSON.stringify('[data-flat-row-id=')}+JSON.stringify('grouped-sub-space:'+${JSON.stringify(id)}+'::header')+']')
+    const button=header?.querySelector('.workspace-more-button')
+    if(!button)return false
+    header.scrollIntoView({block:'center'});button.click();return true
+  `)
+  if(!opened)throw new Error(`Project ${id} header not found.`)
+  await settle(250)
+  const menu=await pageEval(connection,`
+    const items=pickAll('button,[role="menuitem"]')
+    const button=items.find(e=>['重命名','编辑分组','修改分组','编辑'].includes(textOf(e)))
+    return button?center(button):null
+  `)
+  if(!menu)throw new Error('Project rename/edit action not found; no name was changed.')
+  await connection.click(menu.x,menu.y)
+  await waitForPage(connection,`!!pick('.space-editor-modal input[aria-label="分组名称"]')`,{label:'rename project editor'})
+  await modalProjectName(connection,name)
+  return {id,name}
+}
+export async function openNewProjectTask(connection,id) {
+  await connection.key(['Escape'])
+  const activated=await pageEval(connection,`
+    const header=document.querySelector(${JSON.stringify('[data-flat-row-id=')}+JSON.stringify('grouped-sub-space:'+${JSON.stringify(id)}+'::header')+']')
+    const button=header?.querySelector('.workspace-new-task-button')
+    if(!button)return false
+    header.scrollIntoView({block:'center'});button.click();return true
+  `)
+  if(!activated)throw new Error(`New-task control for project ${id} not found.`)
+  await waitForPage(connection,`pickAll('[data-conversation-input-id]').some(e=>e.getAttribute('data-conversation-input-id')?.startsWith('__home__:'))`,{label:'project task composer'})
+}
+export async function moveSessionToProject(connection,sessionId,projectName) {
+  await connection.key(['Escape'])
+  const opened=await pageEval(connection,`
+    const card=document.querySelector(${JSON.stringify('.cb-agent-card[data-conversation-id=')}+JSON.stringify(${JSON.stringify(sessionId)})+']')
+    const button=card?.querySelector('.agent-card-more-button')
+    if(!button)return false
+    card.scrollIntoView({block:'center'});button.click();return true
+  `)
+  if(!opened)throw new Error('Target session card not found for project assignment.')
+  await settle(200)
+  const group=await pageEval(connection,`const button=pickAll('.conversation-context-menu button').find(e=>textOf(e)==='分组');return button?center(button):null`)
+  if(!group)throw new Error('Session group submenu not found.')
+  await connection.hover(group.x,group.y)
+  await waitForPage(connection,`!!pick('.cb-context-submenu')`,{label:'group submenu'})
+  const target=await pageEval(connection,`
+    const matches=[...document.querySelectorAll('.cb-context-submenu button')].filter(e=>textOf(e)===${JSON.stringify(projectName)})
+    if(matches.length!==1)return null
+    matches[0].scrollIntoView({block:'nearest'});return visible(matches[0])?center(matches[0]):null
+  `)
+  if(!target)throw new Error('Exact unique target project not found in the session group submenu.')
+  await connection.click(target.x,target.y)
+  await settle(300)
 }

@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-bridge",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "在 Windows 桌面上为 Codex 和 ChatGPT Work 提供共用的 WorkBuddy 工具。",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",

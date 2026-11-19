@@ -110,6 +110,12 @@ export async function query(request, { dbPath = DB_PATH, helperPath } = {}) {
         if (request.op === 'session') {
           return { ok: true, row: db.prepare(`select ${SELECT_COLUMNS} from sessions where id = ?`).get(request.id) ?? null }
         }
+        if (request.op === 'spaces') {
+          return {ok:true,rows:db.prepare('select id, name, status, primary_folder_path from spaces where deleted_at is null or deleted_at <= 0').all()}
+        }
+        if (request.op === 'session-space') {
+          return {ok:true,row:db.prepare('select id, space_id, expert_id from sessions where id = ? and deleted_at is null').get(request.id)??null}
+        }
         if (request.op === 'title') {
           return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and coalesce(nullif(custom_title, ''), title) = ?`).all(request.title) }
         }

@@ -75,10 +75,10 @@ test('requestId retries recover without calling any UI or sending again', async 
   const f=fixture(t);f.row('a');f.log('a',[{...user('TASK'),timestamp:2100},assistant('answer')])
   const ticket=createTicket(f.options,{task:'TASK',requestId:'retry-key',since:2000,sessionId:'a'})
   const bridge=createBridge({dbPath:f.dbPath,port:1,lockPath:f.lockPath,autoRestart:false})
-  const result=await bridge.callTool('workbuddy_run',{task:'TASK',session:'new',requestId:'retry-key'})
+  const result=await bridge.callTool('workbuddy_run',{task:'TASK',session:'new',routing:'manual',requestId:'retry-key'})
   assert.equal(result.dispatchId,ticket.dispatchId)
   assert.equal(existingRequest(f.options,'retry-key').dispatchId,ticket.dispatchId)
-  assert.equal((await bridge.callTool('workbuddy_run',{task:'different',requestId:'retry-key'})).code,'REQUEST_CONFLICT')
+  assert.equal((await bridge.callTool('workbuddy_run',{task:'different',routing:'manual',requestId:'retry-key'})).code,'REQUEST_CONFLICT')
 })
 test('durable evidence survives a new bridge instance; model metadata drift does not abort', async t => {
   const f=fixture(t);f.row('a',{model:'hy4flash-free',updated_at:3000,last_activity_at:3000})

@@ -1,6 +1,32 @@
-# WorkBuddy Bridge 2.1.0
+# WorkBuddy Bridge 2.2.0
 
 Codex 与 ChatGPT Work 桌面本地聊天共用的 WorkBuddy MCP 工具。Windows、Node22.13+，零 npm 依赖；无需额外 API Key。控制的是 WorkBuddy，自身执行权限不继承 Codex 沙箱。
+
+## 2.2 默认项目、会话与执行配置
+
+- 默认 **Hy4 / 思考强度高 / 300K**；代码相关任务默认召唤 **高级开发工程师（吴八哥）**。显式model、effort、contextK、expert优先，taskKind可明确code/general；未标注时仅用本地规则初判代码任务。
+- 提供callerProjectKey时，一个调用方项目对应一个原生WorkBuddy分组/space；未提供项目标识时，一个callerConversationId对应一个分组。首次创建并命名，名称保留调用方可读名称和稳定短后缀；过长时保守缩短，完整名称保留在调用上下文。projectName可显式更新原生分组名。
+- 同一个调用方会话再次run/send，**省略session或传auto**，优先复用该会话的上次WB任务。不同调用方会话共享项目时，各自保存上次任务，不串话。显式session:new始终新建，现有任务忙碌时不自动重复投递。
+- 调用方Agent负责语义关系判断：relationship:related复用；unrelated在同项目另起任务；different-project配合topicKey建立新的主题项目分支；same-project返回基础项目。auto在缺少明确信号时偏向连续性，只用哈希关键词重合度粗筛极低关联任务，不能冒充语义理解。
+- 专家无法在历史任务里直接更换；需要新专家而旧任务不匹配时另起任务。召唤专家后的示例输入会清空，最终完整任务文本验证一致才发送；发送后核对原生space_id，避免专家召唤把任务带离项目。
+
+**调用方标识由调用Agent自动组织，不需要用户手工填写。** MCP可能跨聊天共享进程，因而不把服务启动时的CODEX_THREAD_ID当作每次调用身份：MCP调用须在参数或本插件支持的逐请求_meta中携带callerConversationId。CLI可以使用当前任务环境的CODEX_THREAD_ID/CODEX_SESSION_ID；项目身份只接受明确的callerProjectKey/CODEX_PROJECT_ID，不能拿插件安装目录猜项目。确实无法取得可靠身份时返回CALLER_CONTEXT_REQUIRED，不创建公共映射。使用方法见skills/workbuddy-bridge/SKILL.md。
+
+```json
+{
+  "callerConversationId": "当前调用会话的稳定ID",
+  "callerProjectKey": "当前项目稳定ID或规范化绝对目录",
+  "callerProjectName": "Example Project",
+  "taskKind": "code",
+  "relationship": "related",
+  "requestId": "本轮唯一且重试保持不变的键",
+  "task": "本轮任务"
+}
+```
+
+新增workbuddy_project可get/ensure/rename/attach（修复已发送任务的分组归属）。映射保存在`.workbuddy/bridge-routing/`，可配置routingDir；任务仅保存哈希关键词，不存完整提示词。重试键按调用会话和有效项目分区。2.1原有非映射调用可显式routing:manual；旧dispatchId仍可recover。
+
+详情及42项测试、真机项目创建/改名/复用与专家预填验收见 [2.2记录](docs/2.2-routing.md)。
 
 ## 启动规则
 
@@ -12,7 +38,7 @@ Codex 与 ChatGPT Work 桌面本地聊天共用的 WorkBuddy MCP 工具。Window
 2. 发送前保存 dispatch 票据；返回 `dispatchId`、可能已识别的 `sessionId` 和 evidence。`pending-observation` 表示暂未观察到归属，不等于未发送。sendState为`send-outcome-unknown`时，submitted是null；不要盲目重发。
 3. 用 `workbuddy_recover({dispatchId})` 继续识别。已从sessions恢复ID时可同时传sessionId，由桥核对原消息指纹和时间再绑定。2.0失败返回的原evidence可通过recover显式导入；不要自行修改opaque evidence。
 4. 用 `workbuddy_wait({dispatchId,timeoutSec:30})` 等待；等待预算结束返回`waiting`，不是执行失败，也不会取消。默认wait/run等待30秒，长任务用同一票据续等。原sessionId/evidence接口仍保留。
-5. 纠错使用同一明确sessionId和新的requestId发送，得到新回合票据。运行中的会话先取消并确认非忙，再发送新回合；不把追加指令混成原回合。
+5. 纠错默认省略session，按调用方映射复用前次会话；也可显式提供准确sessionId。使用新的requestId，得到新回合票据。运行中的会话先取消并确认非忙，再发送新回合；不把追加指令混成原回合。
 6. 用 `workbuddy_cancel({dispatchId})` 中断；仅操作该会话的可见停止按钮，不以重启代替取消。requested与confirmed分开：confirmed只表示随后观测到非忙，不能推定后端取消原因。已有新用户回合时，旧票据不能取消它。
 
 票据默认存 `%USERPROFILE%/.workbuddy/bridge-dispatches/`，可配置dispatchDir。保存任务SHA256、字节基线、消息ID、模型选择与元数据观测，不保存完整任务正文。基于文件互斥串行化UI流程；只读等待/恢复与单独校验的取消不被长run阻塞。异常退出的旧锁不按时长强抢，需确认原进程退出后清理。
@@ -45,7 +71,7 @@ node --test tests/*.test.mjs
 
 配置文件由WORKBUDDY_BRIDGE_CONFIG指定，支持port、appPath、dbPath、dispatchDir、waitTimeoutSec、autoRestart等。环境变量另支持WORKBUDDY_CDP_PORT、WORKBUDDY_EXE、WORKBUDDY_DB、WORKBUDDY_HOME、WORKBUDDY_BRIDGE_LOCK；两端必须共用锁和票据目录。doctor仅观察，不启动。
 
-当前12项工具：status、sessions、models、experts、open、configure、send、wait、recover、cancel、collect、run，均带workbuddy_前缀。DSH适配器继续调用相同核心。
+当前13项工具：status、sessions、models、experts、open、project、configure、send、wait、recover、cancel、collect、run，均带workbuddy_前缀。DSH适配器继续调用相同核心。
 
 详细修复依据、28项离线测试和真机回归见 [2.1修复记录](docs/2.1-fixes.md)。2.0的历史审查保留在docs/review.md，其旧启动规则已被本版用户要求取代。
 

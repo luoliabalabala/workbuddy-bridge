@@ -46,6 +46,8 @@ try {
   let result
   if (request.op === 'sessions') result = sessions(db, Math.max(1, Math.min(Number(request.limit) || 20, 200)), request.query)
   else if (request.op === 'session') result = db.prepare(`${SELECT} where id = ?`).get(request.id) ?? null
+  else if (request.op === 'spaces') result = db.prepare('select id, name, status, primary_folder_path from spaces where deleted_at is null or deleted_at <= 0').all()
+  else if (request.op === 'session-space') result = db.prepare('select id, space_id, expert_id from sessions where id = ? and deleted_at is null').get(request.id)??null
   else if (request.op === 'title') result = db.prepare(`${SELECT} where deleted_at is null and coalesce(nullif(custom_title, ''), title) = ?`).all(request.title)
   else if (request.op === 'active') result = db.prepare(`${SELECT} where deleted_at is null and lower(status) in ('active', 'working', 'running', 'pending', 'queued')`).all()
   else if (request.op === 'latest') {

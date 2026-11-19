@@ -4,6 +4,7 @@ import path from 'node:path'
 import * as flow from './lib/flow.js'
 import { withLock } from './lib/lock.js'
 import { existingRequest, taskHash } from './lib/dispatch.js'
+import {executionDefaults,scopeRequest} from './lib/routing.js'
 
 const str = (description) => ({ type: 'string', minLength: 1, description })
 const num = (description, minimum = 0, maximum = 3600) => ({ type: 'number', minimum, maximum, description })
@@ -13,6 +14,17 @@ const settings = {
   effort: { type: 'string', enum: ['关闭', '低', '中', '高', '超高'] },
   contextK: num('Context K offered by the selected model; 0 means its maximum.', 0, 100000),
   expert: str('Expert display name. New tasks only; unsupported configuration fails before sending.'),
+}
+const routing = {
+  callerConversationId: str('Stable calling Codex/Work conversation id. Defaults to per-request caller metadata or CODEX_THREAD_ID/CODEX_SESSION_ID; never infer from the MCP server cwd.'),
+  callerProjectKey: str('Optional stable caller project id or canonical project path. Same key shares one native WB group; each calling conversation keeps its own last task.'),
+  callerProjectName: str('Readable caller project name for the initial WB project name.'),
+  callerConversationTitle: str('Readable caller conversation title when no caller project is supplied.'),
+  projectName: str('Desired readable mapped project name; explicit changes rename the managed WB group.'),
+  relationship:{type:'string',enum:['auto','related','unrelated','different-project','same-project'],description:'Calling agent semantic routing decision. Default auto prefers the last task unless clearly disjoint. unrelated starts a task in the same WB project; different-project creates a topic branch.'},
+  topicKey:str('Stable topic key for different-project branch routing.'),
+  taskKind:{type:'string',enum:['code','general'],description:'Optional task classification. Code tasks default to expert 吴八哥 (高级开发工程师).'},
+  routing:{type:'string',enum:['auto','manual'],default:'auto',description:'Auto maps caller projects/conversations and reuses tasks; manual intentionally bypasses mapping.'},
 }
 const collection = {
   outputDir: str('Absolute folder for an optional summary; files stay at their source unless mode is copy.'),
@@ -28,13 +40,14 @@ const catalogue = [
   tool('workbuddy_models', 'Read the live model menu. Opens the menu in the local WorkBuddy window.', {}),
   tool('workbuddy_experts', 'Read the live expert market in the local WorkBuddy window.', { query: str('Name or role filter.') }),
   tool('workbuddy_open', 'Open an unambiguous historical session or the new-task view. Prefer workbuddy_run for an atomic complete workflow.', { session }),
-  tool('workbuddy_configure', 'Open the explicit target and configure it. Explicitly requested settings must succeed.', { session, ...settings }, ['session']),
-  tool('workbuddy_send', 'Submit once with a durable dispatch ticket. Use requestId for retry deduplication; pending-observation means recover, not resend.', { session, task: str('Authorized task to execute in WorkBuddy.'), requestId: str('Caller retry key. Reusing it never sends another copy of the same task.'), waitSeconds: num('Optional completion wait. Zero returns the dispatch ticket.') }, ['session', 'task']),
+  tool('workbuddy_project','Inspect/ensure/rename the caller-mapped native WB project (UI group/space), or repair a sent dispatch project assignment. Defaults to read-only get.',{action:{type:'string',enum:['get','ensure','rename','attach'],default:'get'},...routing,dispatchId:str('Required for attach; must belong to this caller mapping.')}),
+  tool('workbuddy_configure', 'Configure an explicit target. Omitted settings default to Hy4/high/300K; code taskKind adds 吴八哥. Explicit settings must succeed.', { session, ...settings,taskKind:routing.taskKind }, ['session']),
+  tool('workbuddy_send', 'Map the caller to a WB project and prefer its previous task; omitted settings use Hy4/high/300K, code tasks use 吴八哥. Clear expert prefills and submit once with a durable ticket.', { session,...routing,...settings, task: str('Authorized task to execute in WorkBuddy.'), requestId: str('Caller retry key. Reusing it never sends another copy of the same task.'), waitSeconds: num('Optional completion wait. Zero returns the dispatch ticket.') }, ['task']),
   tool('workbuddy_wait', 'Wait for a dispatchId or explicit session. Default budget 30 seconds; waiting is not failure and never cancels the task.', { dispatchId: str('Durable dispatch id.'), sessionId: str('Target session id/prefix/title.'), timeoutSec: num('Wait budget in seconds.', 0.1), evidence: { type: 'object', description: 'Original evidence; prefer dispatchId so callers cannot accidentally rewrite it.' } }),
   tool('workbuddy_recover', 'Recover/bind an existing dispatch to its verified session and user turn. Never sends a message. Legacy 2.0 evidence can be explicitly imported after transcript validation.', { dispatchId: str('Durable dispatch id.'), sessionId: str('Optional recovered exact session id.'), evidence: { type: 'object', description: 'Original 2.0 failed-send evidence, only for legacy import.' } }),
   tool('workbuddy_cancel', 'Interrupt only a verified dispatch on its exact session and user turn; never kills the app. Returns requested and confirmed separately.', { dispatchId: str('Dispatch to interrupt.') }, ['dispatchId']),
   tool('workbuddy_collect', 'Read answer and candidate file paths for an explicit session; optionally write a summary or copy files without overwriting collisions.', { sessionId: str('Target session id/prefix/title.'), ...collection, sinceMs: num('Optional timestamp lower bound for modified-file candidates.', 0, Number.MAX_SAFE_INTEGER) }, ['sessionId']),
-  tool('workbuddy_run', 'Open/configure/send once with a durable ticket, then wait up to 30s by default. Use recover/wait/cancel with its dispatchId. Missing CDP port triggers an authorized forced relaunch by default.', { task: str('Authorized task to execute in WorkBuddy.'), requestId: str('Stable caller retry key.'), session, ...settings, ...collection, timeoutSec: num('Wait budget in seconds.', 0.1), restart: { type: 'boolean', default: false } }, ['task']),
+  tool('workbuddy_run', 'Auto-create/name a WB project for the caller; prefer that conversation’s previous task unless low relevance. Defaults Hy4/high/300K and 吴八哥 for code. Submit once, then wait up to 30s; recover/wait/cancel by dispatchId.', { task: str('Authorized task to execute in WorkBuddy.'), requestId: str('Stable caller retry key.'), session,...routing, ...settings, ...collection, timeoutSec: num('Wait budget in seconds.', 0.1), restart: { type: 'boolean', default: false } }, ['task']),
 ]
 
 export function loadConfig(env = process.env) {
@@ -64,16 +77,19 @@ export function validateArguments(schema, args) {
   if (args.mode === 'copy' && !args.outputDir) throw invalid('mode copy requires outputDir')
   if (args.mode === 'copy' && !args.allowedOutputDirs?.length) throw invalid('copy requires explicit allowedOutputDirs source roots')
   if (args.restart && args.launch === false) throw invalid('restart requires launch=true')
+  if(args.action==='attach'&&!args.dispatchId)throw invalid('attach requires dispatchId')
+  if(args.action==='rename'&&!args.projectName)throw invalid('rename requires projectName')
 }
 
 export function createBridge(config = {}) {
   if (config.port !== undefined && (!Number.isInteger(Number(config.port)) || Number(config.port) < 1 || Number(config.port) > 65535)) throw invalid('port must be between 1 and 65535')
-  const runtime = flow.resolveOptions({ ...config, autoRestart: config.autoRestart !== false })
-  if (!Number.isInteger(runtime.port) || runtime.port < 1 || runtime.port > 65535) throw invalid('port must be between 1 and 65535')
-  const lockPath = config.lockPath ?? path.join(process.env.WORKBUDDY_HOME ?? path.join(os.homedir(), '.workbuddy'), 'bridge-locks', `cdp-${runtime.port}.lock`)
+  const baseRuntime = flow.resolveOptions({ ...config, autoRestart: config.autoRestart !== false })
+  if (!Number.isInteger(baseRuntime.port) || baseRuntime.port < 1 || baseRuntime.port > 65535) throw invalid('port must be between 1 and 65535')
+  const lockPath = config.lockPath ?? path.join(process.env.WORKBUDDY_HOME ?? path.join(os.homedir(), '.workbuddy'), 'bridge-locks', `cdp-${baseRuntime.port}.lock`)
   return {
     listTools: () => structuredClone(catalogue),
-    async callTool(name, args = {}) {
+    async callTool(name, args = {}, callContext={}) {
+      const runtime={...baseRuntime,...Object.fromEntries(['callerConversationId','callerProjectKey','callerProjectName','callerConversationTitle'].filter(k=>typeof callContext[k]==='string'&&callContext[k].trim()).map(k=>[k,callContext[k]]))}
       let lastDispatch = args.dispatchId ? {dispatchId:args.dispatchId,sessionId:args.sessionId} : undefined
       try {
         const definition = catalogue.find(t => t.name === name)
@@ -81,6 +97,7 @@ export function createBridge(config = {}) {
         validateArguments(definition.inputSchema, args)
         if (name === 'workbuddy_wait' && !args.dispatchId && !args.sessionId) throw invalid('dispatchId or sessionId is required')
         const execute = async () => {
+          if(['workbuddy_run','workbuddy_send'].includes(name))args=scopeRequest(args,runtime)
           if (['workbuddy_run','workbuddy_send'].includes(name) && args.requestId) {
             const prior = existingRequest(runtime, args.requestId)
             if (prior) {
@@ -95,22 +112,15 @@ export function createBridge(config = {}) {
             case 'workbuddy_models': result = await flow.models(runtime); break
             case 'workbuddy_experts': result = await flow.experts(runtime, args); break
             case 'workbuddy_open': result = await flow.open(runtime, args); break
+            case 'workbuddy_project': result = await flow.projectControl(runtime,args);break
             case 'workbuddy_configure': {
               const opened = await flow.open(runtime, { session: args.session })
               if (!opened.ok) throw new Error(opened.text ?? 'Could not open the target session')
-              result = await flow.configure(runtime, args); break
+              result = await flow.configure(runtime, executionDefaults(args)); break
             }
             case 'workbuddy_send': {
-              const opened = await flow.open(runtime, { session: args.session })
-              if (!opened.ok) throw new Error(opened.text ?? 'Could not open the target session')
-              const sent = await flow.send(runtime, { task: args.task, sessionId: opened.row?.id ?? opened.sessionId, requestId: args.requestId })
-              lastDispatch = {dispatchId:sent.dispatchId,sessionId:sent.sessionId,evidence:sent.evidence,submitted:sent.ok}
-              result = { ok: true, text: `Task submitted. Session: ${sent.sessionId ?? '(not yet observed)'}.`, ...sent }
-              if (!sent.ok || sent.needsRecovery) break
-              if (args.waitSeconds > 0) {
-                const waited = await flow.waitForRun(runtime, { sessionId: sent.sessionId, since: sent.startedAt, evidence: sent.evidence, timeoutSec: args.waitSeconds })
-                result = { ...result, ok: waited.done && waited.status === 'completed', text: `${result.text}\n${waited.done ? waited.status : 'timeout; task may still be running'}`, waited }
-              }
+              result=await flow.run(runtime,args,{sendOnly:true})
+              lastDispatch={dispatchId:result.dispatchId,sessionId:result.sessionId,evidence:result.evidence,submitted:result.ok}
               break
             }
             case 'workbuddy_wait': {
