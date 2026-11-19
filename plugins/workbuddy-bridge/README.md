@@ -84,3 +84,5 @@ node --test tests/*.test.mjs
 详细修复依据、28项离线测试和真机回归见 [2.1修复记录](docs/2.1-fixes.md)。2.0的历史审查保留在docs/review.md，其旧启动规则已被本版用户要求取代。
 
 [官方本地MCP规范](https://developers.openai.com/plugins/deploy/desktop-only) · [插件与本地市场](https://developers.openai.com/plugins/build/plugins)。本包仅桌面本地执行，不部署公网入口。
+
+项目代码和文档采用 [MIT 许可证](LICENSE)。

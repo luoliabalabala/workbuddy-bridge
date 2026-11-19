@@ -1,5 +1,5 @@
 cb25b3ab637e2be5ec285ec283bd8cf862a080702a8d2076977c3ad16bd97ef4  dsh-workbuddy-bridge-1.0.2.zip
-5dbabc203a38214f050a791a236225ea32cf39b92063efb315ad8beb4a80c4ad  workbuddy-bridge-2.0.0-codex-work.zip
-cbeca01e193c7dd2db8b60ab0824acde9a712c933cd93c79729cc34025077584  workbuddy-bridge-2.1.0-codex-work.zip
-d4203d2957b8b5602e3d2da163987a97f03f68b9f48505934505c22caf50078e  workbuddy-bridge-2.2.0-codex-work.zip
-17ca816c6cb09bc3c97c56201c3247230afb70befc7264653561d8340444019c  workbuddy-bridge-2.3.0-codex-work.zip
+d5f936fb1796d4f211c6e9fc75ba38db92ef09a1e5803c8f05894edd06e41cac  workbuddy-bridge-2.0.0-codex-work.zip
+37dd490d90c07d3e3712e0a6471516f7f2f422acef7be1e05df68644e15ce0db  workbuddy-bridge-2.1.0-codex-work.zip
+fb62b3e7c1a727c2b05521d85e97edb7193576d6acd6ee903da6eac2886b081f  workbuddy-bridge-2.2.0-codex-work.zip
+8987eb047ce16e046be77d16b81ccc20096bde3b098e516c6f68562dc007d688  workbuddy-bridge-2.3.0-codex-work.zip

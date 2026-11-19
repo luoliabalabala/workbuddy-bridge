@@ -45,5 +45,5 @@ node --test tests/*.test.mjs
 
 历史 DSH 包请在 DSH 内从本地安装其 `src/` 目录。原始包的使用说明与代码随 [v1.0.2 快照](releases/) 保存。
 
-本项目为独立集成。原始 DSH 包未附开放源代码许可证，版本材料按私有归档管理。[来源与许可证说明](NOTICE.md)
+本项目为独立集成，项目代码和文档按 MIT 许可发布。[许可证](LICENSE) · [来源说明](NOTICE.md)
 
