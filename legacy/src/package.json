@@ -1,0 +1,39 @@
+{
+  "name": "dsh-workbuddy-bridge",
+  "version": "1.0.2",
+  "private": true,
+  "description": "Drive WorkBuddy (CodeBuddy desktop) through computer use: pick a history session or start a new one, choose model, context window, thinking effort and expert, send the task, wait for it, then hand back the produced files without duplicating them.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "workbuddy",
+    "computer-use",
+    "cdp"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "win32"
+  ]
+}

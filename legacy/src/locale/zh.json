@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "title": "WorkBuddy 桥",
+    "description": "用 computer use 打开 WorkBuddy：选历史会话或新建会话，挑模型、上下文长度、思考强度与专家，投递任务并回收获产物文件。"
+  },
+  "panel": {
+    "title": "WorkBuddy 桥",
+    "sessions": "历史会话",
+    "run": "投递任务",
+    "status": "状态"
+  }
+}

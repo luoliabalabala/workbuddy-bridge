@@ -1,0 +1,8 @@
+- insert:
+    - id: workbuddy-bridge
+      name: dsh-workbuddy-bridge
+      config:
+        port: 9222
+        launchTimeoutMs: 30000
+        waitTimeoutSec: 900
+        autoRestart: true
