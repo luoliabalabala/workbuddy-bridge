@@ -1,6 +1,14 @@
-# WorkBuddy Bridge 2.2.0
+# WorkBuddy Bridge 2.3.0
 
 Codex 与 ChatGPT Work 桌面本地聊天共用的 WorkBuddy MCP 工具。Windows、Node22.13+，零 npm 依赖；无需额外 API Key。控制的是 WorkBuddy，自身执行权限不继承 Codex 沙箱。
+
+## 低内存后台模式
+
+1. 用 `workbuddy_send`（省略 `waitSeconds`）得到 `dispatchId`，再用 `workbuddy_watch` 的 `start` 开始后台观察。相同票据复用监控。默认最多等 30 分钟，可用 `timeoutSec` 调整。
+2. 每次 MCP 调用返回后释放桥接执行器。独立监控负责读取本机 SQLite 和转录，确认本回合完成后，将回复与文件候选保存到票据目录的 `watch-<dispatchId>.json`，然后退出。
+3. 用 `action:status` 查询，用 `action:result` 取回结果。宿主的 MCP 通信进程一直监听调用。可用 `node bin/cli.mjs call` 按次启动并完整退出；频繁调用可设置 `WORKBUDDY_BRIDGE_WARM_SECONDS=60`，让 MCP 执行器热驻留 60 秒（默认 0，上限 300）。
+
+WorkBuddy 桌面程序继续执行任务。监控只读应用数据，结果通过工具查询。超时或出错后可用同一票据继续观察；异常强杀留下监控锁时，确认记录的进程已退出再清理该锁。
 
 ## 2.2 默认项目、会话与执行配置
 
@@ -71,7 +79,7 @@ node --test tests/*.test.mjs
 
 配置文件由WORKBUDDY_BRIDGE_CONFIG指定，支持port、appPath、dbPath、dispatchDir、waitTimeoutSec、autoRestart等。环境变量另支持WORKBUDDY_CDP_PORT、WORKBUDDY_EXE、WORKBUDDY_DB、WORKBUDDY_HOME、WORKBUDDY_BRIDGE_LOCK；两端必须共用锁和票据目录。doctor仅观察，不启动。
 
-当前13项工具：status、sessions、models、experts、open、project、configure、send、wait、recover、cancel、collect、run，均带workbuddy_前缀。DSH适配器继续调用相同核心。
+当前14项工具：status、sessions、models、experts、open、project、configure、send、wait、watch、recover、cancel、collect、run，均带workbuddy_前缀。DSH适配器继续调用相同核心。
 
 详细修复依据、28项离线测试和真机回归见 [2.1修复记录](docs/2.1-fixes.md)。2.0的历史审查保留在docs/review.md，其旧启动规则已被本版用户要求取代。
 

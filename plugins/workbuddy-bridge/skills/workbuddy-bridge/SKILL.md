@@ -19,6 +19,7 @@ description: 在 Windows 桌面上让 Codex 或 ChatGPT Work 调用本机 WorkBu
 - 观察用status(launch:false)。需要启动/执行时，用户已要求默认强制重启没有调试端口的既有WorkBuddy，不因运行或忙碌记录暂停；端口可用则复用。该重启可能中断应用内任务，不能把它混作任务级取消。autoRestart:false可明确禁用该默认行为。
 - 完整委派优先run，配置取自实时models/experts。显式配置失败不发送。提供稳定requestId，同一任务的重试复用原键，避免重复执行。
 - 保存dispatchId。pending-observation或send-outcome-unknown时先recover，不自动重发；submitted:null表示发送结果未知。recover可核对并绑定恢复出的sessionId，旧2.0原evidence也通过该入口验证导入，不能由消费者改写evidence。
+- 用户希望节省内存或在后台等待时，用send（省略waitSeconds）拿到dispatchId，再用workbuddy_watch(action:start)交给独立监控。调用返回即释放桥接执行器；后续用action:status/result读取。监控超时或失败时用同一票据继续观察，不重发任务。WorkBuddy仍需运行以执行任务。
 - wait优先传dispatchId，默认30秒一段。waiting不是失败，也不取消；继续用原票据等待。旧回合有后续用户消息时标记superseded，不把新答案归给旧任务。
 - 低层open/configure使用明确session；run/send默认走上方映射。桥按稳定ID校验可见composer，不能用标题相似放行。纠错是同一会话的新回合，使用新requestId；运行中先cancel并确认非忙。
 - cancel使用dispatchId，只点经核实的目标会话停止按钮。requested表示发出请求，confirmed表示随后已非忙，后端取消原因未独立证明。旧票据不能停止后来回合，不通过重启替代取消。

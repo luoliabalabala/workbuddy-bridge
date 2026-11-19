@@ -7,10 +7,10 @@ export const taskHash = value => crypto.createHash('sha256').update(normalize(va
 export const BUSY_STATUSES = ['active', 'working', 'running', 'pending', 'queued']
 export const isBusy = status => BUSY_STATUSES.includes(String(status).toLowerCase())
 const error = (code, text) => Object.assign(new Error(text), { code })
-const folder = options => options.dispatchDir ?? path.join(path.dirname(options.dbPath), 'bridge-dispatches')
+export const dispatchFolder = options => options.dispatchDir ?? path.join(path.dirname(options.dbPath), 'bridge-dispatches')
 const ticketPath = (options, id) => {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id ?? '')) throw error('INVALID_DISPATCH', 'Invalid dispatch id.')
-  return path.join(folder(options), `${id}.json`)
+  return path.join(dispatchFolder(options), `${id}.json`)
 }
 export function loadTicket(options, id) {
   try { return JSON.parse(fs.readFileSync(ticketPath(options, id), 'utf8')) }
@@ -26,14 +26,14 @@ export function saveTicket(options, ticket) {
 }
 export function existingRequest(options, requestId) {
   if (!requestId) return undefined
-  try { return loadTicket(options, JSON.parse(fs.readFileSync(path.join(folder(options), `request-${taskHash(requestId)}.json`))).dispatchId) }
+  try { return loadTicket(options, JSON.parse(fs.readFileSync(path.join(dispatchFolder(options), `request-${taskHash(requestId)}.json`))).dispatchId) }
   catch (e) { if (e.code === 'ENOENT') return undefined; throw e }
 }
 export function createTicket(options, { task, requestId, ...details }) {
   const ticket = { dispatchId: crypto.randomUUID(), state: 'prepared', taskHash: taskHash(task), taskLength: normalize(task).length, since: Date.now(), baselineBytes: 0, observations: [], ...details }
   saveTicket(options, ticket)
   if (requestId) {
-    try { fs.writeFileSync(path.join(folder(options), `request-${taskHash(requestId)}.json`), JSON.stringify({ dispatchId: ticket.dispatchId }), { flag: 'wx', mode: 0o600 }) }
+    try { fs.writeFileSync(path.join(dispatchFolder(options), `request-${taskHash(requestId)}.json`), JSON.stringify({ dispatchId: ticket.dispatchId }), { flag: 'wx', mode: 0o600 }) }
     catch (e) { if (e.code === 'EEXIST') throw error('DUPLICATE_REQUEST', 'Request already reserved; use recover.'); throw e }
   }
   return ticket

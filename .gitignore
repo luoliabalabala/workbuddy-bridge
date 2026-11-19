@@ -1,0 +1,10 @@
+.env
+.env.*
+node_modules/
+.workbuddy/
+*.db
+*.sqlite*
+*.jsonl
+*.lock
+test-temp/
+

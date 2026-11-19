@@ -206,7 +206,7 @@ export async function send(options, { task, sessionId, requestId, requestedSetti
 function pendingTicket(ticket) {
   return { ok: true, status: 'pending-observation', submitted: ticket.state === 'send-outcome-unknown' ? null : ticket.state !== 'prepared', sendState: ticket.state, needsRecovery: true, text: 'Recover with dispatchId before considering another send. The durable ticket preserves the send state and attribution.', dispatchId: ticket.dispatchId, sessionId: ticket.sessionId, evidence: evidenceOf(ticket), startedAt: ticket.since,routing:ticket.routing,composerVerification:ticket.composerVerification }
 }
-export async function recover(options, { dispatchId, sessionId, evidence } = {}) {
+export async function recover(options, { dispatchId, sessionId, evidence } = {}, { readOnly = false } = {}) {
   let ticket
   if (dispatchId) ticket = loadTicket(options, dispatchId)
   else {
@@ -229,13 +229,13 @@ export async function recover(options, { dispatchId, sessionId, evidence } = {})
   ticket.state = turn.superseded ? 'superseded' : isBusy(row.status) ? 'working' : row.status
   ticket.superseded = turn.superseded
   observe(ticket, row, 'recovered')
-  saveTicket(options, ticket)
+  if (!readOnly) saveTicket(options, ticket)
   return { ok: true, text: `Recovered dispatch ${ticket.dispatchId} and session ${row.id}.`, dispatchId: ticket.dispatchId, sessionId: row.id, status: ticket.state, superseded:turn.superseded, evidence: evidenceOf(ticket), observations: ticket.observations, selectionAtSubmit: ticket.selectionAtSubmit,routing:ticket.routing,composerVerification:ticket.composerVerification, wallElapsedMs: Date.now()-ticket.since, hostWaitElapsedMs: ticket.hostWaitElapsedMs ?? 0, lastProgressObservedAt: ticket.lastProgressObservedAt, usage: 'NOT_MEASURED', backendModel: 'NOT_INDEPENDENTLY_OBSERVED', modelMetadataNote: 'Global/session metadata can change with other tasks; this is not proof that the running backend model changed.' }
 }
-export async function waitForRun(options, { sessionId, timeoutSec, evidence, dispatchId } = {}) {
+export async function waitForRun(options, { sessionId, timeoutSec, evidence, dispatchId } = {}, { readOnly = false, intervalMs = 1000 } = {}) {
   let ticket
   if (dispatchId || evidence?.dispatchId) {
-    const recovered = await recover(options, { dispatchId: dispatchId ?? evidence.dispatchId, sessionId })
+    const recovered = await recover(options, { dispatchId: dispatchId ?? evidence.dispatchId, sessionId }, { readOnly })
     if (recovered.needsRecovery) return { ...recovered, done: false }
     evidence = recovered.evidence
     sessionId = recovered.sessionId
@@ -257,7 +257,7 @@ export async function waitForRun(options, { sessionId, timeoutSec, evidence, dis
     const log = transcript(options, last)
     const turn = evidence ? turnEvidence(log, evidence, {allowSuperseded:true}) : { userObserved: true, answer: log.lastAssistant }
     if (turn.superseded) return {done:true,status:'superseded',sessionId:last.id,row:last,turn}
-    if (ticket) {
+    if (ticket && !readOnly) {
       ticket = loadTicket(options, ticket.dispatchId)
       if (ticket.lastProgressBytes !== log.bytes) { ticket.lastProgressBytes = log.bytes; ticket.lastProgressObservedAt = Date.now() }
       ticket.state = last.status
@@ -272,7 +272,7 @@ export async function waitForRun(options, { sessionId, timeoutSec, evidence, dis
     if (last.status === 'completed' && freshStatus && turn.userObserved && turn.answer) return { done: true, status: 'completed', sessionId: last.id, row: last, turn }
     if (['cancelled','canceled','interrupted','aborted'].includes(last.status) && turn.userObserved) return { done: true, status: last.status, sessionId: last.id, row: last, turn }
     if (Date.now() >= deadline) break
-    await sleep(Math.min(1000, Math.max(1, deadline - Date.now())))
+    await sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now())))
   } while (Date.now() <= deadline)
   return { done: false, status: last.status, sessionId: last.id, row: last }
 }
