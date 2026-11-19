@@ -12,13 +12,13 @@ import path from 'node:path'
 export const HOME = os.homedir()
 
 /** User data root: `%APPDATA%\WorkBuddy` for Electron storage, `.workbuddy` for the agent runtime. */
-export const WORKBUDDY_HOME = path.join(HOME, '.workbuddy')
+export const WORKBUDDY_HOME = process.env.WORKBUDDY_HOME ?? path.join(HOME, '.workbuddy')
 export const WORKBUDDY_ROAMING = path.join(process.env.APPDATA ?? path.join(HOME, 'AppData', 'Roaming'), 'WorkBuddy')
 
 /** Default new-task workspace root; every "new task" gets a timestamped folder here. */
 export const WORKSPACE_ROOT = path.join(HOME, 'WorkBuddy')
 
-export const DB_PATH = path.join(WORKBUDDY_HOME, 'workbuddy.db')
+export const DB_PATH = process.env.WORKBUDDY_DB ?? path.join(WORKBUDDY_HOME, 'workbuddy.db')
 export const MODELS_JSON = path.join(WORKBUDDY_HOME, 'models.json')
 
 /** Candidate install locations for WorkBuddy.exe, most specific first. */
@@ -49,10 +49,14 @@ export function projectSlug(cwd) {
 }
 
 /** Transcript event log for one session, preferring the path that matches its cwd. */
-export function transcriptPath(sessionId, cwd) {
-  const roots = [path.join(WORKBUDDY_HOME, 'projects'), path.join(HOME, '.codebuddy', 'projects')]
+export function transcriptPath(sessionId, cwd, { dbPath, workbuddyHome } = {}) {
+  if (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) return undefined
+  const dataHome = workbuddyHome ?? (dbPath ? path.dirname(dbPath) : WORKBUDDY_HOME)
+  const roots = [path.join(dataHome, 'projects')]
+  // A custom data root must not accidentally read a real user's other account.
+  if (dataHome === WORKBUDDY_HOME && !dbPath && !workbuddyHome) roots.push(path.join(HOME, '.codebuddy', 'projects'))
   if (typeof cwd === 'string' && cwd.length > 0) {
-    const direct = path.join(WORKBUDDY_HOME, 'projects', projectSlug(cwd), `${sessionId}.jsonl`)
+    const direct = path.join(dataHome, 'projects', projectSlug(cwd), `${sessionId}.jsonl`)
     if (fs.existsSync(direct)) return direct
   }
   for (const root of roots) {

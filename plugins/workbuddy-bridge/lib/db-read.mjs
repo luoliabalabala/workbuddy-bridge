@@ -33,8 +33,8 @@ function sessions(db, limit, query) {
     ? db.prepare(`${SELECT} where deleted_at is null and (title like ? or custom_title like ?)
         order by last_activity_at desc limit ?`).all(`%${query}%`, `%${query}%`, limit)
     : db.prepare(`${SELECT} where deleted_at is null order by last_activity_at desc limit ?`).all(limit)
-  const usage = db.prepare('select session_id, used, size from session_usage')
-  const used = new Map(usage.all().map((row) => [row.session_id, row]))
+  let used = new Map()
+  try { used = new Map(db.prepare('select session_id, used, size from session_usage').all().map((row) => [row.session_id, row])) } catch { /* Usage is optional. */ }
   return rows.map((row) => {
     const stat = used.get(row.id)
     return { ...row, used: stat?.used ?? null, size: stat?.size ?? null }
@@ -44,10 +44,12 @@ function sessions(db, limit, query) {
 const db = open()
 try {
   let result
-  if (request.op === 'sessions') result = sessions(db, Math.min(Number(request.limit) || 20, 200), request.query)
+  if (request.op === 'sessions') result = sessions(db, Math.max(1, Math.min(Number(request.limit) || 20, 200)), request.query)
   else if (request.op === 'session') result = db.prepare(`${SELECT} where id = ?`).get(request.id) ?? null
+  else if (request.op === 'title') result = db.prepare(`${SELECT} where deleted_at is null and coalesce(nullif(custom_title, ''), title) = ?`).all(request.title)
+  else if (request.op === 'active') result = db.prepare(`${SELECT} where deleted_at is null and status in ('active', 'running', 'pending')`).all()
   else if (request.op === 'latest') {
-    result = db.prepare(`${SELECT} where deleted_at is null and created_at >= ? order by created_at desc limit 5`).all(Number(request.since) || 0)
+    result = db.prepare(`${SELECT} where deleted_at is null and created_at >= ? order by created_at desc limit 200`).all(Number(request.since) || 0)
   } else result = { error: `unknown op: ${String(request.op)}` }
   process.stdout.write(JSON.stringify({ ok: true, result }))
 } catch (error) {

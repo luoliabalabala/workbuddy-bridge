@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "workbuddy_bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/bin/mcp.mjs"],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

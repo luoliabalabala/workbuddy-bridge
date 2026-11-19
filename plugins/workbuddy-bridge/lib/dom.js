@@ -170,10 +170,13 @@ export async function openSessionByTitle(connection, title, { timeoutMs = 20000 
     const point = await pageEval(connection, `
       const cards = pickAll('div.cb-agent-card')
       const wanted = ${JSON.stringify(title)}
-      const match = cards.find((el) => textOf(el).startsWith(wanted))
+      const matches = cards.filter((el) => textOf(el).startsWith(wanted))
+      if (matches.length > 1) return { ambiguous: true }
+      const match = matches[0]
       return match ? center(match) : null
     `)
     if (point !== null) {
+      if (point.ambiguous) throw new Error('Multiple visible session cards match this title; no card was clicked.')
       await connection.click(point.x, point.y)
       await settle(900)
       return conversationTitle(connection)

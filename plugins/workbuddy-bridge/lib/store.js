@@ -99,20 +99,27 @@ export async function query(request, { dbPath = DB_PATH, helperPath } = {}) {
       const db = new sqlite.DatabaseSync(dbPath, { readOnly: true })
       try {
         if (request.op === 'sessions') {
-          const limit = Math.min(Number(request.limit) || 20, 200)
+          const limit = Math.max(1, Math.min(Number(request.limit) || 20, 200))
           const rows = request.query
             ? db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and (title like ? or custom_title like ?) order by last_activity_at desc limit ?`).all(`%${request.query}%`, `%${request.query}%`, limit)
             : db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null order by last_activity_at desc limit ?`).all(limit)
-          const usage = new Map(db.prepare('select session_id, used, size from session_usage').all().map((row) => [row.session_id, row]))
+          let usage = new Map()
+          try { usage = new Map(db.prepare('select session_id, used, size from session_usage').all().map((row) => [row.session_id, row])) } catch { /* Older schemas may omit usage. */ }
           return { ok: true, rows: rows.map((row) => ({ ...row, used: usage.get(row.id)?.used ?? null, size: usage.get(row.id)?.size ?? null })) }
         }
         if (request.op === 'session') {
           return { ok: true, row: db.prepare(`select ${SELECT_COLUMNS} from sessions where id = ?`).get(request.id) ?? null }
         }
+        if (request.op === 'title') {
+          return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and coalesce(nullif(custom_title, ''), title) = ?`).all(request.title) }
+        }
+        if (request.op === 'active') {
+          return { ok: true, rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and status in ('active', 'running', 'pending')`).all() }
+        }
         if (request.op === 'latest') {
           return {
             ok: true,
-            rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and created_at >= ? order by created_at desc limit 5`).all(Number(request.since) || 0),
+            rows: db.prepare(`select ${SELECT_COLUMNS} from sessions where deleted_at is null and created_at >= ? order by created_at desc limit 200`).all(Number(request.since) || 0),
           }
         }
         return { ok: false, error: `unknown op: ${String(request.op)}` }
@@ -153,6 +160,10 @@ export async function sessionsSince(since, options = {}) {
   return { ok: true, rows: Array.isArray(response.rows) ? response.rows : [] }
 }
 
+export async function activeSessions(options = {}) {
+  return query({ op: 'active' }, options)
+}
+
 const SKIP_USER_PREFIXES = ['<system-reminder', '<user_info', '<cwd>', '<context>']
 
 function textOfContent(content) {
@@ -191,13 +202,16 @@ function pathsFromArgs(args) {
  * Parse one session transcript.
  * @returns {{ path?:string, title?:string, userTexts:string[], assistantTexts:string[], lastAssistant?:string, files:string[], toolNames:Record<string,number> }}
  */
-export function readTranscript(sessionId, cwd) {
-  const file = transcriptPath(sessionId, cwd)
-  const empty = { path: undefined, title: undefined, userTexts: [], assistantTexts: [], lastAssistant: undefined, files: [], toolNames: {} }
+export function readTranscript(sessionId, cwd, options = {}) {
+  const file = transcriptPath(sessionId, cwd, options)
+  const empty = { path: undefined, bytes: 0, title: undefined, userTexts: [], assistantTexts: [], userEvents: [], assistantEvents: [], lastAssistant: undefined, files: [], toolNames: {} }
   if (file === undefined) return empty
   let raw = ''
+  let startOffset = 0
+  let bytes = 0
   try {
     const stat = fs.statSync(file)
+    bytes = stat.size
     if (stat.size > 40 * 1024 * 1024) {
       // Only the tail matters for "what did it say last"; read the last 8 MB.
       const handle = fs.openSync(file, 'r')
@@ -206,8 +220,12 @@ export function readTranscript(sessionId, cwd) {
         const buffer = Buffer.alloc(stat.size - start)
         fs.readSync(handle, buffer, 0, buffer.length, start)
         raw = buffer.toString('utf8')
+        startOffset = start
         const firstBreak = raw.indexOf('\n')
-        if (start > 0 && firstBreak >= 0) raw = raw.slice(firstBreak + 1)
+        if (start > 0 && firstBreak >= 0) {
+          startOffset += Buffer.byteLength(raw.slice(0, firstBreak + 1))
+          raw = raw.slice(firstBreak + 1)
+        }
       } finally {
         fs.closeSync(handle)
       }
@@ -221,8 +239,14 @@ export function readTranscript(sessionId, cwd) {
   const toolNames = {}
   const userTexts = []
   const assistantTexts = []
+  const userEvents = []
+  const assistantEvents = []
   let title
-  for (const line of raw.split(/\r?\n/)) {
+  let offset = startOffset
+  for (const chunk of raw.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+    const line = chunk.replace(/\r?\n$/, '')
+    const lineOffset = offset
+    offset += Buffer.byteLength(chunk)
     if (line.length < 2) continue
     let entry
     try {
@@ -233,10 +257,16 @@ export function readTranscript(sessionId, cwd) {
     if (entry.type === 'ai-title' && typeof entry.aiTitle === 'string') title = entry.aiTitle
     else if (entry.type === 'message' && entry.role === 'user') {
       const text = textOfContent(entry.content)
-      if (text.length > 0 && !SKIP_USER_PREFIXES.some((prefix) => text.trimStart().startsWith(prefix))) userTexts.push(text)
+      if (text.length > 0 && !SKIP_USER_PREFIXES.some((prefix) => text.trimStart().startsWith(prefix))) {
+        userTexts.push(text)
+        userEvents.push({ text, offset: lineOffset })
+      }
     } else if (entry.type === 'message' && entry.role === 'assistant') {
       const text = textOfContent(entry.content)
-      if (text.length > 0) assistantTexts.push(text)
+      if (text.length > 0) {
+        assistantTexts.push(text)
+        assistantEvents.push({ text, offset: lineOffset })
+      }
     } else if (entry.type === 'function_call') {
       const name = String(entry.name ?? entry.toolName ?? entry.tool ?? 'unknown')
       toolNames[name] = (toolNames[name] ?? 0) + 1
@@ -259,9 +289,12 @@ export function readTranscript(sessionId, cwd) {
   }
   return {
     path: file,
+    bytes,
     title,
     userTexts,
     assistantTexts,
+    userEvents,
+    assistantEvents,
     lastAssistant: assistantTexts.length > 0 ? assistantTexts[assistantTexts.length - 1] : undefined,
     files: [...files],
     toolNames,

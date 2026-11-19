@@ -4,10 +4,10 @@
  * WorkBuddy is a single-instance Electron app: whichever process starts first
  * owns the instance and a later launch with a debugging flag is silently
  * ignored. So the plugin cannot "add" the port to a running app — it has to
- * relaunch it, and that relaunch is done here automatically:
+ * relaunch it. Closing an existing app requires restart:true or opt-in autoRestart:
  *
  *   port answers            → use it
- *   running, no port        → close every window, start it again with the flag
+ *   running, no port        → return NEEDS_RESTART unless restart is authorized
  *   not running             → start it with the flag
  *
  * One guard exists for the user's sake: when the database says a turn is
@@ -18,10 +18,9 @@ import { spawn } from 'node:child_process'
 import { debuggerVersion, sleep } from './cdp.js'
 import { findExecutable } from './paths.js'
 import * as store from './store.js'
+import helperPath from './helper-path.js'
 
 const EXE_NAME = 'WorkBuddy.exe'
-/** A turn that touched the database this recently is treated as still running. */
-const LIVE_TURN_MS = 120000
 
 function runCapture(command, args, timeoutMs = 8000) {
   return new Promise((resolve) => {
@@ -97,7 +96,8 @@ async function forceClose(tools) {
 async function launch(tools, exe, port) {
   const viaComputerUse = await computerUse(tools, 'launch_app', { target: exe, arguments: `--remote-debugging-port=${port}` }, 20000)
   if (viaComputerUse.ok && viaComputerUse.text.toLowerCase().includes('error') === false) return 'computer-use'
-  const child = spawn(exe, [`--remote-debugging-port=${port}`], { detached: true, stdio: 'ignore', windowsHide: false })
+  const child = spawn(exe, [`--remote-debugging-port=${port}`], { detached: true, stdio: 'ignore', windowsHide: true })
+  child.on('error', () => { /* waitForPort reports startup failure. */ })
   child.unref()
   return 'spawn'
 }
@@ -115,10 +115,9 @@ async function waitForPort(port, timeoutMs) {
 
 /** The session WorkBuddy is working on right now, if any. */
 async function liveTurn(dbPath) {
-  const response = await store.listSessions({ limit: 5, ...(dbPath === undefined ? {} : { dbPath }) })
-  if (response.ok !== true) return undefined
-  const now = Date.now()
-  return (response.rows ?? []).find((row) => row.status === 'active' && Number(row.last_activity_at ?? 0) > now - LIVE_TURN_MS)
+  const response = await store.activeSessions({ helperPath, ...(dbPath === undefined ? {} : { dbPath }) })
+  if (response.ok !== true) throw needsRestartError(`Cannot verify active sessions (${response.error}); WorkBuddy was not closed.`)
+  return (response.rows ?? [])[0]
 }
 
 function needsRestartError(detail) {
@@ -132,7 +131,7 @@ function needsRestartError(detail) {
  *
  * @returns {Promise<{port:number, launched:boolean, restarted:boolean, how?:string, version:object}>}
  */
-export async function ensureRunning({ port, launchTimeoutMs = 30000, appPath, tools, restart = false, autoRestart = true, dbPath }) {
+export async function ensureRunning({ port, launchTimeoutMs = 30000, appPath, tools, restart = false, autoRestart = false, dbPath }) {
   const existing = await debuggerVersion(port)
   if (existing !== undefined && restart !== true) {
     return { port, launched: false, restarted: false, version: existing }
@@ -154,7 +153,7 @@ export async function ensureRunning({ port, launchTimeoutMs = 30000, appPath, to
     // Running but unreachable: this is the single-instance case. Relaunching is
     // the only way to get a port, and it is what the caller asked for by using
     // any of these tools.
-    if (autoRestart !== true) {
+    if (autoRestart !== true && restart !== true) {
       throw needsRestartError(
         `WorkBuddy is running without a DevTools port on ${port}, and automatic restart is disabled `
         + '("autoRestart": false in the plugin config). Close it and call again.',
@@ -181,12 +180,14 @@ export async function ensureRunning({ port, launchTimeoutMs = 30000, appPath, to
 
   let how = await launch(tools, exe, port)
   let version = await waitForPort(port, launchTimeoutMs)
-  if (version === undefined && (await isRunning())) {
+  if (version === undefined && (restart === true || autoRestart === true) && (await isRunning())) {
     // A leftover process can swallow the flag (single-instance lock) — one more
     // clean relaunch usually binds the port.
+    const busy = await liveTurn(dbPath)
+    if (busy) throw needsRestartError(`WorkBuddy has an active session ${busy.id}; retry restart was skipped.`)
     await forceClose(tools)
     restarted = true
-    how = `${how} (retried once)`
+    how = `${await launch(tools, exe, port)} (retried once)`
     version = await waitForPort(port, launchTimeoutMs)
   }
   if (version === undefined) {

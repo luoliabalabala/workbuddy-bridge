@@ -1,0 +1,17 @@
+{
+  "name": "workbuddy-bridge",
+  "version": "2.0.0",
+  "description": "在 Windows 桌面上为 Codex 和 ChatGPT Work 提供共用的 WorkBuddy 工具。",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "WorkBuddy 桥",
+    "shortDescription": "Codex 与 ChatGPT Work 共用本机 WorkBuddy",
+    "developerName": "Local tools",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "logo": "./icon.svg",
+    "defaultPrompt": ["检查本机 WorkBuddy 状态", "用 WorkBuddy 执行我授权的任务并回收结果"]
+  }
+}
